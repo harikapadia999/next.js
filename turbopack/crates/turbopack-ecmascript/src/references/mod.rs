@@ -674,7 +674,9 @@ async fn analyze_ecmascript_module_internal(
     });
     analysis.set_side_effects_mode(if has_side_effect_free_directive {
         SideEffectsMode::HasSideEffectFreeDirective
-    } else if side_effects::has_side_effects(program, comments, eval_context.unresolved_mark) {
+    } else if GLOBALS.set(globals, || {
+        side_effects::has_side_effects(program, comments, eval_context.unresolved_mark)
+    }) {
         SideEffectsMode::SideEffectful
     } else {
         SideEffectsMode::LocallySideEffectFree
