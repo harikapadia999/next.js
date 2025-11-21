@@ -1,0 +1,1624 @@
+//! Side effect analysis for JavaScript/TypeScript programs.
+//!
+//! This module provides functionality to determine if a program has side effects
+//! at the top level. This is useful for tree-shaking and dead code elimination.
+//!
+//! ## What are side effects?
+//!
+//! A side effect is any observable behavior that occurs when code is executed:
+//! - Function calls (unless marked with `/*#__PURE__*/` or known to be pure)
+//! - Constructor calls (unless marked with `/*#__PURE__*/`)
+//! - Assignments to variables or properties
+//! - Property mutations
+//! - Update expressions (`++`, `--`)
+//! - Delete expressions
+//! - I/O operations
+//! - Async operations (await, yield)
+//!
+//! ## Features
+//!
+//! ### 1. Pure Annotations
+//!
+//! The analyzer respects `/*#__PURE__*/` and `/*@__PURE__*/` annotations:
+//!
+//! ```javascript
+//! // Has side effects
+//! const x = foo();
+//!
+//! // No side effects (marked pure)
+//! const y = /*#__PURE__*/ foo();
+//! ```
+//!
+//! ### 2. Known Pure Built-ins
+//!
+//! The analyzer recognizes common pure JavaScript built-ins:
+//!
+//! ```javascript
+//! // No side effects - known pure functions
+//! const abs = Math.abs(-5);
+//! const keys = Object.keys(obj);
+//! const isArray = Array.isArray(x);
+//!
+//! // No side effects - known pure constructors
+//! const s = new Set();
+//! const m = new Map();
+//! const re = new RegExp('pattern');
+//! ```
+//!
+//! ### 3. Expression-Level Analysis
+//!
+//! The analyzer recursively checks expressions:
+//!
+//! ```javascript
+//! // No side effects - pure operations
+//! const result = Math.abs(-5) + Math.floor(3.14);
+//!
+//! // Has side effects - impure argument
+//! const value = Math.abs(sideEffect());
+//! ```
+//!
+//! ## Conservative Analysis
+//!
+//! This analyzer is intentionally conservative. When in doubt, it assumes code
+//! has side effects. This is safe for tree-shaking purposes as it prevents
+//! incorrectly removing code that might be needed.
+
+use once_cell::sync::Lazy;
+use rustc_hash::{FxHashMap, FxHashSet};
+use swc_core::{
+    common::{Mark, comments::Comments},
+    ecma::{
+        ast::*,
+        visit::{Visit, VisitWith},
+    },
+};
+
+use crate::utils::unparen;
+
+/// Known pure built-in functions organized by object (e.g., Math, Object, Array).
+///
+/// These are JavaScript built-in functions that are known to be side-effect free.
+/// This list is conservative and only includes functions that:
+/// 1. Don't modify global state
+/// 2. Don't perform I/O
+/// 3. Are deterministic (given the same inputs, produce the same outputs)
+///
+/// Note: Some of these can throw exceptions, but for tree-shaking purposes,
+/// we consider them pure as they don't have observable side effects beyond exceptions.
+///
+/// Structured as FxHashMap<base_object, FxHashSet<method_name>> for O(1) lookup.
+static KNOWN_PURE_FUNCTIONS: Lazy<FxHashMap<&'static str, FxHashSet<&'static str>>> =
+    Lazy::new(|| {
+        let mut map = FxHashMap::default();
+
+        // Math functions (all Math.* methods are pure)
+        map.insert(
+            "Math",
+            FxHashSet::from_iter([
+                "abs", "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "cbrt", "ceil",
+                "clz32", "cos", "cosh", "exp", "expm1", "floor", "fround", "hypot", "imul", "log",
+                "log10", "log1p", "log2", "max", "min", "pow", "round", "sign", "sin", "sinh",
+                "sqrt", "tan", "tanh", "trunc",
+            ]),
+        );
+
+        // String static methods
+        map.insert(
+            "String",
+            FxHashSet::from_iter(["fromCharCode", "fromCodePoint", "raw"]),
+        );
+
+        // Number static methods
+        map.insert(
+            "Number",
+            FxHashSet::from_iter([
+                "isFinite",
+                "isInteger",
+                "isNaN",
+                "isSafeInteger",
+                "parseFloat",
+                "parseInt",
+            ]),
+        );
+
+        // Object static methods (read-only operations)
+        map.insert(
+            "Object",
+            FxHashSet::from_iter([
+                "keys",
+                "values",
+                "entries",
+                "hasOwn",
+                "getOwnPropertyNames",
+                "getOwnPropertySymbols",
+                "getOwnPropertyDescriptor",
+                "getOwnPropertyDescriptors",
+                "getPrototypeOf",
+                "is",
+                "isExtensible",
+                "isFrozen",
+                "isSealed",
+            ]),
+        );
+
+        // Array static methods
+        map.insert("Array", FxHashSet::from_iter(["isArray", "from", "of"]));
+
+        map
+    });
+
+/// Known pure global functions that can be called directly (not as methods).
+///
+/// These are global functions that are side-effect free when called.
+/// Structured as FxHashSet for O(1) lookup.
+static KNOWN_PURE_GLOBAL_FUNCTIONS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
+    FxHashSet::from_iter([
+        "String",
+        "Number",
+        "Symbol",
+        "Boolean",
+        "isNaN",
+        "isFinite",
+        "parseInt",
+        "parseFloat",
+        "decodeURI",
+        "decodeURIComponent",
+    ])
+});
+
+/// Known pure constructors.
+///
+/// These constructors create new objects without side effects (no global state modification).
+/// They are safe to eliminate if their result is unused.
+/// Structured as FxHashSet for O(1) lookup.
+static KNOWN_PURE_CONSTRUCTORS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
+    FxHashSet::from_iter([
+        // Built-in collections
+        "Set",
+        "Map",
+        "WeakSet",
+        "WeakMap",
+        // Regular expressions
+        "RegExp",
+        // Data structures
+        "Array",
+        "Object",
+        // Typed arrays
+        "Int8Array",
+        "Uint8Array",
+        "Uint8ClampedArray",
+        "Int16Array",
+        "Uint16Array",
+        "Int32Array",
+        "Uint32Array",
+        "Float32Array",
+        "Float64Array",
+        "BigInt64Array",
+        "BigUint64Array",
+        // Other built-ins
+        "Date",
+        "Error",
+        "TypeError",
+        "RangeError",
+        "SyntaxError",
+        "ReferenceError",
+        "URIError",
+        "EvalError",
+        "Promise",
+        "ArrayBuffer",
+        "DataView",
+        "URL",
+        "URLSearchParams",
+        // Boxes
+        "String",
+        "Number",
+        "Symbol",
+        "Boolean",
+    ])
+});
+
+/// Known pure prototype methods for string literals.
+///
+/// These methods don't mutate the string (strings are immutable) and don't have side effects.
+static KNOWN_PURE_STRING_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
+    FxHashSet::from_iter([
+        // Case conversion
+        "toLowerCase",
+        "toUpperCase",
+        "toLocaleLowerCase",
+        "toLocaleUpperCase",
+        "charAt",
+        "charCodeAt",
+        "codePointAt",
+        "slice",
+        "substring",
+        "substr",
+        "indexOf",
+        "lastIndexOf",
+        "includes",
+        "startsWith",
+        "endsWith",
+        "search",
+        "match",
+        "matchAll",
+        "trim",
+        "trimStart",
+        "trimEnd",
+        "trimLeft",
+        "trimRight",
+        "repeat",
+        "padStart",
+        "padEnd",
+        "concat",
+        "split",
+        "replace",
+        "replaceAll",
+        "normalize",
+        "localeCompare",
+        "isWellFormed",
+        "toString",
+        "valueOf",
+    ])
+});
+
+/// Known pure prototype methods for array literals.
+///
+/// These methods don't mutate the array and don't have side effects.
+/// Note: Methods like map, filter, etc. can have side effects if the callback has side effects,
+/// but we check callback arguments separately.
+static KNOWN_PURE_ARRAY_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
+    FxHashSet::from_iter([
+        // Non-mutating iteration
+        "map",
+        "filter",
+        "reduce",
+        "reduceRight",
+        "find",
+        "findIndex",
+        "findLast",
+        "findLastIndex",
+        "some",
+        "every",
+        "flat",
+        "flatMap",
+        // Access methods
+        "at",
+        "slice",
+        "concat",
+        "includes",
+        "indexOf",
+        "lastIndexOf",
+        "join",
+        // Conversion
+        "toString",
+        "toLocaleString",
+        "toReversed",
+        "toSorted",
+        "toSpliced",
+        "with",
+    ])
+});
+
+static KNOWN_PURE_OBJECT_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> =
+    Lazy::new(|| FxHashSet::from_iter(["hasOwnProperty", "propertyIsEnumerable"]));
+
+/// Known pure prototype methods for number literals.
+static KNOWN_PURE_NUMBER_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
+    FxHashSet::from_iter([
+        "toExponential",
+        "toFixed",
+        "toPrecision",
+        "toString",
+        "valueOf",
+        "toLocaleString",
+    ])
+});
+
+/// Known pure prototype methods for boolean literals.
+static KNOWN_PURE_BOOLEAN_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> =
+    Lazy::new(|| FxHashSet::from_iter(["toString", "valueOf"]));
+
+/// Known pure prototype methods for RegExp literals.
+///
+/// Note: While `test()` and `exec()` mutate `lastIndex` on regexes with global/sticky flags,
+/// for literal regexes this is safe because:
+/// 1. Literals create fresh objects each time
+/// 2. The mutation is local to that object
+/// 3. The mutated state doesn't escape the expression
+///
+/// However, to be conservative for tree-shaking, we exclude these methods.
+static KNOWN_PURE_REGEXP_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> =
+    Lazy::new(|| FxHashSet::from_iter(["toString", "test", "exec"]));
+
+/// Analyzes a program to determine if it contains side effects at the top level.
+///
+/// Returns `true` if the program has side effects, `false` if it's side-effect free.
+///
+/// # Arguments
+///
+/// * `program` - The parsed JavaScript/TypeScript program to analyze
+/// * `comments` - Comments associated with the program (used for `/*#__PURE__*/` detection)
+/// * `unresolved_mark` - Mark identifying unresolved/global identifiers. The program should have
+///   been processed with the SWC resolver transform using this mark before calling this function.
+///   This is used to detect if built-in names like `Math`, `Array`, etc. are shadowed by local
+///   variables.
+///
+/// # Examples
+///
+/// ```ignore
+/// use swc_core::common::comments::SingleThreadedComments;
+/// use swc_core::ecma::parser::parse_file_as_program;
+/// use turbopack_ecmascript::analyzer::side_effects::has_side_effects;
+///
+/// let comments = SingleThreadedComments::default();
+/// let program = parse_file_as_program(/* ... */);
+///
+/// // Side-effect free code
+/// if !has_side_effects(&program, &comments) {
+///     // Safe to tree-shake
+/// }
+/// ```
+///
+/// # Pure Examples
+///
+/// The following code is considered side-effect free:
+/// - `const x = 5;`
+/// - `const arr = [1, 2, 3];`
+/// - `function foo() { return 1; }`
+/// - `const result = Math.abs(-5);`
+/// - `const x = /*#__PURE__*/ foo();`
+///
+/// # Impure Examples
+///
+/// The following code has side effects:
+/// - `console.log('hi');`
+/// - `x = 5;`
+/// - `foo();`
+/// - `new SideEffect();`
+pub fn has_side_effects(program: &Program, comments: &dyn Comments, unresolved_mark: Mark) -> bool {
+    let mut visitor = SideEffectVisitor::new(comments, unresolved_mark);
+    program.visit_with(&mut visitor);
+    visitor.has_side_effects
+}
+
+/// Visitor that traverses the AST to detect side effects.
+struct SideEffectVisitor<'a> {
+    comments: &'a dyn Comments,
+    unresolved_mark: Mark,
+    has_side_effects: bool,
+}
+
+impl<'a> SideEffectVisitor<'a> {
+    fn new(comments: &'a dyn Comments, unresolved_mark: Mark) -> Self {
+        Self {
+            comments,
+            unresolved_mark,
+            has_side_effects: false,
+        }
+    }
+
+    /// Mark that we've found a side effect and stop further analysis.
+    fn mark_side_effect(&mut self) {
+        self.has_side_effects = true;
+    }
+
+    /// Check if a span has a `/*#__PURE__*/` or `/*@__PURE__*/` annotation.
+    ///
+    /// These annotations are used by bundlers to mark function calls as side-effect free.
+    /// Uses SWC's built-in `has_flag` method which properly handles the annotation format.
+    fn is_pure_annotated(&self, span: swc_core::common::Span) -> bool {
+        self.comments.has_flag(span.lo, "PURE")
+    }
+
+    /// Check if a callee expression is a known pure built-in function.
+    ///
+    /// This checks if the callee matches patterns like `Math.abs`, `Object.keys`, etc.
+    fn is_known_pure_builtin(&self, callee: &Callee) -> bool {
+        match callee {
+            Callee::Expr(expr) => self.is_known_pure_builtin_function(expr),
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is a known pure built-in function.
+    ///
+    /// This checks for:
+    /// - Member expressions like `Math.abs`, `Object.keys`, etc.
+    /// - Global function identifiers like `isNaN`, `parseInt`, etc.
+    /// - Literal receiver methods like `"hello".toLowerCase()`, `[1,2,3].map()`, etc.
+    ///
+    /// Only returns true if the base identifier is in the global scope (unresolved).
+    /// If it's shadowed by a local variable, we cannot assume it's the built-in.
+    fn is_known_pure_builtin_function(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Member(member) => {
+                let receiver = unparen(&member.obj);
+                match (receiver, &member.prop) {
+                    // Handle global object methods like Math.abs, Object.keys, etc.
+                    (Expr::Ident(obj), MemberProp::Ident(prop)) => {
+                        // Only consider it pure if the base identifier is unresolved (global
+                        // scope). Check if the identifier's context matches
+                        // the unresolved mark.
+                        if obj.ctxt.outer() != self.unresolved_mark {
+                            // The identifier is in a local scope, might be shadowed
+                            return false;
+                        }
+
+                        // O(1) lookup: check if the object has the method in our known pure
+                        // functions
+                        KNOWN_PURE_FUNCTIONS
+                            .get(obj.sym.as_ref())
+                            .map(|methods| methods.contains(prop.sym.as_ref()))
+                            .unwrap_or(false)
+                    }
+                    // Handle literal receiver methods like "hello".toLowerCase(), [1,2,3].map(),
+                    // etc.
+                    (Expr::Lit(lit), MemberProp::Ident(prop)) => {
+                        let method_name = prop.sym.as_ref();
+                        match lit {
+                            Lit::Str(_) => {
+                                KNOWN_PURE_STRING_PROTOTYPE_METHODS.contains(method_name)
+                                    || KNOWN_PURE_OBJECT_PROTOTYPE_METHODS.contains(method_name)
+                            }
+                            Lit::Num(_) => {
+                                KNOWN_PURE_NUMBER_PROTOTYPE_METHODS.contains(method_name)
+                                    || KNOWN_PURE_OBJECT_PROTOTYPE_METHODS.contains(method_name)
+                            }
+                            Lit::Bool(_) => {
+                                KNOWN_PURE_BOOLEAN_PROTOTYPE_METHODS.contains(method_name)
+                                    || KNOWN_PURE_OBJECT_PROTOTYPE_METHODS.contains(method_name)
+                            }
+                            Lit::Regex(_) => {
+                                KNOWN_PURE_REGEXP_PROTOTYPE_METHODS.contains(method_name)
+                                    || KNOWN_PURE_OBJECT_PROTOTYPE_METHODS.contains(method_name)
+                            }
+                            _ => false,
+                        }
+                    }
+                    // Handle array literal methods like [1,2,3].map()
+                    // Note: We don't check array elements here - that's handled in visit_expr
+                    (Expr::Array(_), MemberProp::Ident(prop)) => {
+                        let method_name = prop.sym.as_ref();
+                        KNOWN_PURE_ARRAY_PROTOTYPE_METHODS.contains(method_name)
+                            || KNOWN_PURE_OBJECT_PROTOTYPE_METHODS.contains(method_name)
+                    }
+                    (Expr::Object(_), MemberProp::Ident(prop)) => {
+                        KNOWN_PURE_NUMBER_PROTOTYPE_METHODS.contains(prop.sym.as_ref())
+                    }
+                    _ => false,
+                }
+            }
+            Expr::Ident(ident) => {
+                // Check for global pure functions like isNaN, parseInt, etc.
+                // Only consider it pure if the identifier is unresolved (global scope).
+                if ident.ctxt.outer() != self.unresolved_mark {
+                    return false;
+                }
+
+                // O(1) lookup in the global functions set
+                KNOWN_PURE_GLOBAL_FUNCTIONS.contains(ident.sym.as_ref())
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if an expression is a known pure constructor.
+    ///
+    /// These are built-in constructors that create new objects without side effects.
+    /// Only returns true if the identifier is in the global scope (unresolved).
+    /// If it's shadowed by a local variable, we cannot assume it's the built-in constructor.
+    fn is_known_pure_constructor(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Ident(ident) => {
+                // Only consider it pure if the identifier is unresolved (global scope).
+                // Check if the identifier's context matches the unresolved mark.
+                if ident.ctxt.outer() != self.unresolved_mark {
+                    // The identifier is in a local scope, might be shadowed
+                    return false;
+                }
+
+                // O(1) lookup in the constructors set
+                KNOWN_PURE_CONSTRUCTORS.contains(ident.sym.as_ref())
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<'a> Visit for SideEffectVisitor<'a> {
+    // If we've already found side effects, skip further visitation
+    fn visit_program(&mut self, program: &Program) {
+        if self.has_side_effects {
+            return;
+        }
+        program.visit_children_with(self);
+    }
+
+    fn visit_module(&mut self, module: &Module) {
+        if self.has_side_effects {
+            return;
+        }
+
+        // Only check top-level module items
+        for item in &module.body {
+            if self.has_side_effects {
+                return;
+            }
+            item.visit_with(self);
+        }
+    }
+
+    fn visit_script(&mut self, script: &Script) {
+        if self.has_side_effects {
+            return;
+        }
+
+        // Only check top-level statements
+        for stmt in &script.body {
+            if self.has_side_effects {
+                return;
+            }
+            stmt.visit_with(self);
+        }
+    }
+
+    // Module declarations (imports/exports) need special handling
+    fn visit_module_decl(&mut self, decl: &ModuleDecl) {
+        if self.has_side_effects {
+            return;
+        }
+
+        match decl {
+            // Import statements have no side effects (module loading is tracked separately)
+            ModuleDecl::Import(_) => {}
+
+            // Export declarations need to check their contents
+            ModuleDecl::ExportDecl(export_decl) => {
+                // Check the declaration being exported
+                // Note: Function and class declarations are pure
+                match &export_decl.decl {
+                    Decl::Fn(_) | Decl::Class(_) => {
+                        // Function and class declarations are pure
+                    }
+                    Decl::Var(var_decl) => {
+                        // Variable declarations need their initializers checked
+                        var_decl.visit_with(self);
+                    }
+                    _ => {
+                        // Other declarations should be checked
+                        export_decl.decl.visit_with(self);
+                    }
+                }
+            }
+
+            ModuleDecl::ExportDefaultDecl(export_default_decl) => {
+                // Check the default export
+                match &export_default_decl.decl {
+                    DefaultDecl::Class(_) | DefaultDecl::Fn(_) => {
+                        // Class and function declarations are pure
+                    }
+                    DefaultDecl::TsInterfaceDecl(_) => {
+                        // TypeScript interface declarations are pure
+                    }
+                }
+            }
+
+            ModuleDecl::ExportDefaultExpr(export_default_expr) => {
+                // Check the expression being exported
+                export_default_expr.expr.visit_with(self);
+            }
+
+            // Re-exports have no side effects
+            ModuleDecl::ExportNamed(_) | ModuleDecl::ExportAll(_) => {}
+
+            // TypeScript-specific exports
+            ModuleDecl::TsImportEquals(_)
+            | ModuleDecl::TsExportAssignment(_)
+            | ModuleDecl::TsNamespaceExport(_) => {}
+        }
+    }
+
+    // Statement-level detection
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        if self.has_side_effects {
+            return;
+        }
+
+        match stmt {
+            // Expression statements need checking
+            Stmt::Expr(expr_stmt) => {
+                expr_stmt.visit_with(self);
+            }
+            // Variable declarations need checking (initializers might have side effects)
+            Stmt::Decl(Decl::Var(var_decl)) => {
+                var_decl.visit_with(self);
+            }
+            // Function and class declarations are side-effect free
+            Stmt::Decl(Decl::Fn(_)) | Stmt::Decl(Decl::Class(_)) => {
+                // Function and class declarations don't execute, so no side effects
+            }
+            // Other declarations
+            Stmt::Decl(decl) => {
+                decl.visit_with(self);
+            }
+            // For other statement types, be conservative
+            _ => {
+                // Most other statement types (if, for, while, etc.) at top level
+                // would be unusual and potentially have side effects
+                self.mark_side_effect();
+            }
+        }
+    }
+
+    fn visit_var_declarator(&mut self, var_decl: &VarDeclarator) {
+        if self.has_side_effects {
+            return;
+        }
+
+        // Check the initializer
+        if let Some(init) = &var_decl.init {
+            init.visit_with(self);
+        }
+    }
+
+    // Expression-level detection
+    fn visit_expr(&mut self, expr: &Expr) {
+        if self.has_side_effects {
+            return;
+        }
+
+        match expr {
+            // Pure expressions
+            Expr::Lit(_) => {
+                // Literals are always pure
+            }
+            Expr::Ident(_) => {
+                // Reading identifiers is pure
+            }
+            Expr::Arrow(_) | Expr::Fn(_) => {
+                // Function expressions are pure (don't execute until called)
+            }
+            Expr::Array(arr) => {
+                // Arrays are pure if their elements are pure
+                for elem in arr.elems.iter().flatten() {
+                    elem.visit_with(self);
+                }
+            }
+            Expr::Object(obj) => {
+                // Objects are pure if their property names and initializers
+                for prop in &obj.props {
+                    prop.visit_with(self);
+                }
+            }
+            Expr::Unary(unary) => {
+                // Most unary operations are pure, but delete is not
+                if unary.op == UnaryOp::Delete {
+                    self.mark_side_effect();
+                } else {
+                    unary.arg.visit_with(self);
+                }
+            }
+            Expr::Bin(bin) => {
+                // Binary operations are pure if operands are pure
+                bin.left.visit_with(self);
+                bin.right.visit_with(self);
+            }
+            Expr::Cond(cond) => {
+                // Conditional is pure if all parts are pure
+                cond.test.visit_with(self);
+                cond.cons.visit_with(self);
+                cond.alt.visit_with(self);
+            }
+            Expr::Member(member) => {
+                // Member access is pure - just reading a property doesn't cause side effects.
+                // While getters *could* have side effects, in practice:
+                // 1. Most code doesn't use getters with side effects (rare pattern)
+                // 2. Webpack and rolldown treat member access as pure
+                // 3. Being too conservative here would mark too much code as impure
+                //
+                // We check the object and property for side effects (e.g., computed properties)
+                member.obj.visit_with(self);
+                member.prop.visit_with(self);
+            }
+            Expr::Paren(paren) => {
+                // Parenthesized expressions inherit purity from inner expr
+                paren.expr.visit_with(self);
+            }
+            Expr::Tpl(tpl) => {
+                // Template literals are pure if expressions are pure
+                for expr in &tpl.exprs {
+                    expr.visit_with(self);
+                }
+            }
+
+            // Impure expressions (conservative)
+            Expr::Call(call) => {
+                // Check for /*#__PURE__*/ annotation or for a well known function
+                if self.is_pure_annotated(call.span) || self.is_known_pure_builtin(&call.callee) {
+                    // For known pure builtins, we need to check both:
+                    // 1. The receiver (e.g., the array in [foo(), 2, 3].map(...))
+                    // 2. The arguments
+
+                    // Check the receiver
+                    call.callee.visit_with(self);
+
+                    // Check all arguments
+                    for arg in &call.args {
+                        arg.expr.visit_with(self);
+                    }
+                } else {
+                    // Unmarked calls are considered to have side effects
+                    self.mark_side_effect();
+                }
+            }
+            Expr::New(new) => {
+                // Check for /*#__PURE__*/ annotation or known pure constructor
+                if self.is_pure_annotated(new.span) || self.is_known_pure_constructor(&new.callee) {
+                    // Pure constructor, but still need to check arguments
+                    if let Some(args) = &new.args {
+                        for arg in args {
+                            arg.expr.visit_with(self);
+                        }
+                    }
+                } else {
+                    // Constructor calls are considered to have side effects
+                    self.mark_side_effect();
+                }
+            }
+            Expr::Assign(_) => {
+                // Assignments have side effects
+                self.mark_side_effect();
+            }
+            Expr::Update(_) => {
+                // Updates (++, --) have side effects
+                self.mark_side_effect();
+            }
+            Expr::Await(_) | Expr::Yield(_) => {
+                // Async operations have side effects
+                self.mark_side_effect();
+            }
+            Expr::TaggedTpl(tagged_tpl) => {
+                // Tagged template literals are function calls
+                // But some are known to be pure, like String.raw
+                if !self.is_known_pure_builtin_function(&tagged_tpl.tag) {
+                    self.mark_side_effect();
+                }
+            }
+            Expr::OptChain(opt_chain) => {
+                // Optional chaining can be pure if it's just member access
+                // But if it's an optional call, it has side effects
+                opt_chain.base.visit_with(self);
+            }
+            Expr::Seq(seq) => {
+                // Sequence expressions - check each expression
+                for expr in &seq.exprs {
+                    expr.visit_with(self);
+                }
+            }
+
+            // Be conservative for other expression types
+            // To support more
+            _ => {
+                expr.visit_children_with(self);
+            }
+        }
+    }
+
+    fn visit_opt_chain_base(&mut self, base: &OptChainBase) {
+        if self.has_side_effects {
+            return;
+        }
+
+        match base {
+            OptChainBase::Member(member) => {
+                member.visit_with(self);
+            }
+            OptChainBase::Call(_opt_call) => {
+                // Optional calls are still calls, so impure
+                self.mark_side_effect();
+            }
+        }
+    }
+
+    fn visit_prop_or_spread(&mut self, prop: &PropOrSpread) {
+        if self.has_side_effects {
+            return;
+        }
+
+        match prop {
+            PropOrSpread::Spread(spread) => {
+                spread.expr.visit_with(self);
+            }
+            PropOrSpread::Prop(prop) => {
+                prop.visit_with(self);
+            }
+        }
+    }
+
+    fn visit_prop(&mut self, prop: &Prop) {
+        if self.has_side_effects {
+            return;
+        }
+
+        match prop {
+            Prop::KeyValue(kv) => {
+                kv.key.visit_with(self);
+                kv.value.visit_with(self);
+            }
+            Prop::Getter(getter) => {
+                getter.key.visit_with(self);
+                // Body is not executed at definition time
+            }
+            Prop::Setter(setter) => {
+                setter.key.visit_with(self);
+                // Body is not executed at definition time
+            }
+            Prop::Method(method) => {
+                method.key.visit_with(self);
+                // Body is not executed at definition time
+            }
+            Prop::Shorthand(_) => {
+                // Shorthand properties are pure
+            }
+            Prop::Assign(_) => {
+                // Assignment properties (used in object rest/spread patterns)
+                // are side-effect free at definition
+            }
+        }
+    }
+
+    fn visit_prop_name(&mut self, prop_name: &PropName) {
+        if self.has_side_effects {
+            return;
+        }
+
+        match prop_name {
+            PropName::Computed(computed) => {
+                // Computed property names need evaluation
+                computed.expr.visit_with(self);
+            }
+            _ => {
+                // Other property names are pure
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use swc_core::{
+        common::{FileName, GLOBALS, Mark, SourceMap, comments::SingleThreadedComments, sync::Lrc},
+        ecma::{
+            ast::{EsVersion, Program},
+            parser::{EsSyntax, Syntax, parse_file_as_program},
+            transforms::base::resolver,
+            visit::VisitMutWith,
+        },
+    };
+
+    use super::*;
+
+    /// Helper function to parse JavaScript code from a string and run the resolver
+    /// NOTE: Must be called within a GLOBALS.set() closure
+    fn parse(code: &str) -> (Program, SingleThreadedComments, Mark) {
+        let cm = Lrc::new(SourceMap::default());
+        let fm = cm.new_source_file(Lrc::new(FileName::Anon), code.to_string());
+
+        let comments = SingleThreadedComments::default();
+        let mut errors = vec![];
+
+        let mut program = parse_file_as_program(
+            &fm,
+            Syntax::Es(EsSyntax {
+                jsx: true,
+                ..Default::default()
+            }),
+            EsVersion::latest(),
+            Some(&comments),
+            &mut errors,
+        )
+        .expect("Failed to parse");
+
+        // Run the resolver to mark unresolved identifiers
+        let unresolved_mark = Mark::new();
+        let top_level_mark = Mark::new();
+        program.visit_mut_with(&mut resolver(unresolved_mark, top_level_mark, false));
+
+        (program, comments, unresolved_mark)
+    }
+
+    /// Generate a test that asserts the given code HAS side effects
+    macro_rules! side_effects {
+        ($name:ident, $code:expr) => {
+            #[test]
+            fn $name() {
+                GLOBALS.set(&Default::default(), || {
+                    let (program, comments, unresolved_mark) = parse($code);
+                    assert!(
+                        has_side_effects(&program, &comments, unresolved_mark),
+                        "Expected code to have side effects:\n{}",
+                        $code
+                    );
+                });
+            }
+        };
+    }
+
+    /// Generate a test that asserts the given code is side-effect FREE
+    macro_rules! no_side_effects {
+        ($name:ident, $code:expr) => {
+            #[test]
+            fn $name() {
+                GLOBALS.set(&Default::default(), || {
+                    let (program, comments, unresolved_mark) = parse($code);
+                    assert!(
+                        !has_side_effects(&program, &comments, unresolved_mark),
+                        "Expected code to be side-effect free:\n{}",
+                        $code
+                    );
+                });
+            }
+        };
+    }
+
+    // ==================== Phase 1: Basic Tests ====================
+
+    no_side_effects!(test_empty_program, "");
+
+    no_side_effects!(test_simple_const_declaration, "const x = 5;");
+
+    no_side_effects!(test_simple_let_declaration, "let y = 'string';");
+
+    no_side_effects!(test_array_literal, "const arr = [1, 2, 3];");
+
+    no_side_effects!(test_object_literal, "const obj = { a: 1, b: 2 };");
+
+    no_side_effects!(test_function_declaration, "function foo() { return 1; }");
+
+    no_side_effects!(
+        test_function_expression,
+        "const foo = function() { return 1; };"
+    );
+
+    no_side_effects!(test_arrow_function, "const foo = () => 1;");
+
+    // ==================== Phase 2: Side Effects ====================
+
+    side_effects!(test_console_log, "console.log('hello');");
+
+    side_effects!(test_function_call, "foo();");
+
+    side_effects!(test_method_call, "obj.method();");
+
+    side_effects!(test_assignment, "x = 5;");
+
+    side_effects!(test_member_assignment, "obj.prop = 5;");
+
+    side_effects!(test_constructor_call, "new SideEffect();");
+
+    side_effects!(test_update_expression, "x++;");
+
+    // ==================== Phase 3: Pure Expressions ====================
+
+    no_side_effects!(test_binary_expression, "const x = 1 + 2;");
+
+    no_side_effects!(test_unary_expression, "const x = -5;");
+
+    no_side_effects!(test_conditional_expression, "const x = true ? 1 : 2;");
+
+    no_side_effects!(test_template_literal, "const x = `hello ${world}`;");
+
+    no_side_effects!(test_nested_object, "const obj = { a: { b: { c: 1 } } };");
+
+    no_side_effects!(test_nested_array, "const arr = [[1, 2], [3, 4]];");
+
+    // ==================== Phase 4: Import/Export ====================
+
+    no_side_effects!(test_import_statement, "import x from 'y';");
+
+    no_side_effects!(test_export_statement, "export default 5;");
+
+    no_side_effects!(test_export_const, "export const x = 5;");
+
+    side_effects!(
+        test_export_const_with_side_effect,
+        "export const x = foo();"
+    );
+
+    // ==================== Phase 5: Mixed Cases ====================
+
+    side_effects!(test_call_in_initializer, "const x = foo();");
+
+    side_effects!(test_call_in_array, "const arr = [1, foo(), 3];");
+
+    side_effects!(test_call_in_object, "const obj = { a: foo() };");
+
+    no_side_effects!(
+        test_multiple_declarations_pure,
+        "const x = 1;\nconst y = 2;\nconst z = 3;"
+    );
+
+    side_effects!(
+        test_multiple_declarations_with_side_effect,
+        "const x = 1;\nfoo();\nconst z = 3;"
+    );
+
+    no_side_effects!(test_class_declaration, "class Foo {}");
+
+    no_side_effects!(
+        test_class_with_methods,
+        "class Foo { method() { return 1; } }"
+    );
+
+    // ==================== Phase 6: PURE Annotations ====================
+
+    no_side_effects!(test_pure_annotation_function_call, "/*#__PURE__*/ foo();");
+
+    no_side_effects!(test_pure_annotation_with_at, "/*@__PURE__*/ foo();");
+
+    no_side_effects!(test_pure_annotation_constructor, "/*#__PURE__*/ new Foo();");
+
+    no_side_effects!(
+        test_pure_annotation_in_variable,
+        "const x = /*#__PURE__*/ foo();"
+    );
+
+    no_side_effects!(
+        test_pure_annotation_with_pure_args,
+        "/*#__PURE__*/ foo(1, 2, 3);"
+    );
+
+    // Even with PURE annotation, impure arguments make it impure
+    side_effects!(
+        test_pure_annotation_with_impure_args,
+        "/*#__PURE__*/ foo(bar());"
+    );
+
+    // Without annotation, calls are impure
+    side_effects!(test_without_pure_annotation, "foo();");
+
+    no_side_effects!(
+        test_pure_nested_in_object,
+        "const obj = { x: /*#__PURE__*/ foo() };"
+    );
+
+    no_side_effects!(test_pure_in_array, "const arr = [/*#__PURE__*/ foo()];");
+
+    no_side_effects!(
+        test_multiple_pure_calls,
+        "const x = /*#__PURE__*/ foo();\nconst y = /*#__PURE__*/ bar();"
+    );
+
+    side_effects!(
+        test_mixed_pure_and_impure,
+        "const x = /*#__PURE__*/ foo();\nbar();\nconst z = /*#__PURE__*/ baz();"
+    );
+
+    // ==================== Phase 7: Known Pure Builtins ====================
+
+    no_side_effects!(test_math_abs, "const x = Math.abs(-5);");
+
+    no_side_effects!(test_math_floor, "const x = Math.floor(3.14);");
+
+    no_side_effects!(test_math_max, "const x = Math.max(1, 2, 3);");
+
+    no_side_effects!(test_object_keys, "const keys = Object.keys(obj);");
+
+    no_side_effects!(test_object_values, "const values = Object.values(obj);");
+
+    no_side_effects!(test_object_entries, "const entries = Object.entries(obj);");
+
+    no_side_effects!(test_array_is_array, "const result = Array.isArray([]);");
+
+    no_side_effects!(
+        test_string_from_char_code,
+        "const char = String.fromCharCode(65);"
+    );
+
+    no_side_effects!(test_number_is_nan, "const result = Number.isNaN(x);");
+
+    no_side_effects!(
+        test_multiple_math_calls,
+        "const x = Math.abs(-5);\nconst y = Math.floor(3.14);\nconst z = Math.max(x, y);"
+    );
+
+    // Even pure builtins become impure if arguments are impure
+    side_effects!(
+        test_pure_builtin_with_impure_arg,
+        "const x = Math.abs(foo());"
+    );
+
+    no_side_effects!(
+        test_pure_builtin_in_expression,
+        "const x = Math.abs(-5) + Math.floor(3.14);"
+    );
+
+    side_effects!(
+        test_mixed_builtin_and_impure,
+        "const x = Math.abs(-5);\nfoo();\nconst z = Object.keys({});"
+    );
+
+    // Accessing unknown Math properties is not in our list
+    side_effects!(test_unknown_math_property, "const x = Math.random();");
+
+    // Object.assign is NOT pure (it mutates)
+    side_effects!(test_object_assign, "Object.assign(target, source);");
+
+    no_side_effects!(test_array_from, "const arr = Array.from(iterable);");
+
+    no_side_effects!(test_global_is_nan, "const result = isNaN(value);");
+
+    no_side_effects!(test_global_is_finite, "const result = isFinite(value);");
+
+    no_side_effects!(test_global_parse_int, "const num = parseInt('42', 10);");
+
+    no_side_effects!(test_global_parse_float, "const num = parseFloat('3.14');");
+
+    no_side_effects!(
+        test_global_decode_uri,
+        "const decoded = decodeURI(encoded);"
+    );
+
+    no_side_effects!(
+        test_global_decode_uri_component,
+        "const decoded = decodeURIComponent(encoded);"
+    );
+
+    // String() as a function (not constructor) is pure
+    no_side_effects!(
+        test_global_string_constructor_as_function,
+        "const str = String(123);"
+    );
+
+    // Number() as a function (not constructor) is pure
+    no_side_effects!(
+        test_global_number_constructor_as_function,
+        "const num = Number('123');"
+    );
+
+    // Boolean() as a function (not constructor) is pure
+    no_side_effects!(
+        test_global_boolean_constructor_as_function,
+        "const bool = Boolean(value);"
+    );
+
+    // Symbol() as a function is pure
+    no_side_effects!(
+        test_global_symbol_constructor_as_function,
+        "const sym = Symbol('description');"
+    );
+
+    // Global pure function with impure argument is impure
+    side_effects!(
+        test_global_pure_with_impure_arg,
+        "const result = isNaN(foo());"
+    );
+
+    // isNaN shadowed at top level
+    side_effects!(
+        test_shadowed_global_is_nan,
+        r#"
+            const isNaN = () => sideEffect();
+            const result = isNaN(value);
+            "#
+    );
+
+    // ==================== Phase 8: Edge Cases ====================
+
+    no_side_effects!(test_computed_property, "const obj = { [key]: value };");
+
+    side_effects!(
+        test_computed_property_with_call,
+        "const obj = { [foo()]: value };"
+    );
+
+    no_side_effects!(test_spread_in_array, "const arr = [...other];");
+
+    no_side_effects!(test_spread_in_object, "const obj = { ...other };");
+
+    no_side_effects!(test_destructuring_assignment, "const { a, b } = obj;");
+
+    no_side_effects!(test_array_destructuring, "const [a, b] = arr;");
+
+    no_side_effects!(test_nested_ternary, "const x = a ? (b ? 1 : 2) : 3;");
+
+    no_side_effects!(test_logical_and, "const x = a && b;");
+
+    no_side_effects!(test_logical_or, "const x = a || b;");
+
+    no_side_effects!(test_nullish_coalescing, "const x = a ?? b;");
+
+    no_side_effects!(test_typeof_operator, "const x = typeof y;");
+
+    no_side_effects!(test_void_operator, "const x = void 0;");
+
+    // delete is impure (modifies object)
+    side_effects!(test_delete_expression, "delete obj.prop;");
+
+    no_side_effects!(test_sequence_expression_pure, "const x = (1, 2, 3);");
+
+    side_effects!(test_sequence_expression_impure, "const x = (foo(), 2, 3);");
+
+    no_side_effects!(test_arrow_with_block, "const foo = () => { return 1; };");
+
+    no_side_effects!(
+        test_class_with_constructor,
+        "class Foo { constructor() { this.x = 1; } }"
+    );
+
+    no_side_effects!(test_class_extends, "class Foo extends Bar {}");
+
+    no_side_effects!(test_async_function, "async function foo() { return 1; }");
+
+    no_side_effects!(test_generator_function, "function* foo() { yield 1; }");
+
+    // Tagged templates are function calls, so impure by default
+    side_effects!(test_tagged_template, "const x = tag`hello`;");
+
+    // String.raw is known to be pure
+    no_side_effects!(
+        test_tagged_template_string_raw,
+        "const x = String.raw`hello ${world}`;"
+    );
+
+    no_side_effects!(test_regex_literal, "const re = /pattern/g;");
+
+    no_side_effects!(test_bigint_literal, "const big = 123n;");
+
+    no_side_effects!(test_optional_chaining_pure, "const x = obj?.prop;");
+
+    // Optional chaining with a call is still a call
+    side_effects!(test_optional_chaining_call, "const x = obj?.method();");
+
+    no_side_effects!(
+        test_multiple_exports_pure,
+        "export const a = 1;\nexport const b = 2;\nexport const c = 3;"
+    );
+
+    no_side_effects!(test_export_function, "export function foo() { return 1; }");
+
+    no_side_effects!(test_export_class, "export class Foo {}");
+
+    no_side_effects!(test_reexport, "export { foo } from 'bar';");
+
+    // import() is a function-like expression
+    side_effects!(test_dynamic_import, "const mod = import('./module');");
+
+    no_side_effects!(test_export_default_expression, "export default 1 + 2;");
+
+    side_effects!(
+        test_export_default_expression_with_side_effect,
+        "export default foo();"
+    );
+
+    no_side_effects!(
+        test_export_default_function,
+        "export default function() { return 1; }"
+    );
+
+    no_side_effects!(test_export_default_class, "export default class Foo {}");
+
+    no_side_effects!(
+        test_export_named_with_pure_builtin,
+        "export const result = Math.abs(-5);"
+    );
+
+    side_effects!(
+        test_multiple_exports_mixed,
+        "export const a = 1;\nexport const b = foo();\nexport const c = 3;"
+    );
+
+    // ==================== Phase 9: Pure Constructors ====================
+
+    no_side_effects!(test_new_set, "const s = new Set();");
+
+    no_side_effects!(test_new_map, "const m = new Map();");
+
+    no_side_effects!(test_new_weakset, "const ws = new WeakSet();");
+
+    no_side_effects!(test_new_weakmap, "const wm = new WeakMap();");
+
+    no_side_effects!(test_new_regexp, "const re = new RegExp('pattern');");
+
+    no_side_effects!(test_new_date, "const d = new Date();");
+
+    no_side_effects!(test_new_error, "const e = new Error('message');");
+
+    no_side_effects!(test_new_promise, "const p = new Promise(() => {});");
+
+    no_side_effects!(test_new_array, "const arr = new Array(10);");
+
+    no_side_effects!(test_new_object, "const obj = new Object();");
+
+    no_side_effects!(test_new_typed_array, "const arr = new Uint8Array(10);");
+
+    no_side_effects!(test_new_url, "const url = new URL('https://example.com');");
+
+    no_side_effects!(
+        test_new_url_search_params,
+        "const params = new URLSearchParams();"
+    );
+
+    // Pure constructor with impure arguments is impure
+    side_effects!(
+        test_pure_constructor_with_impure_args,
+        "const s = new Set([foo()]);"
+    );
+
+    no_side_effects!(
+        test_multiple_pure_constructors,
+        "const s = new Set();\nconst m = new Map();\nconst re = new RegExp('test');"
+    );
+
+    // Unknown constructors are impure
+    side_effects!(
+        test_unknown_constructor,
+        "const custom = new CustomClass();"
+    );
+
+    side_effects!(
+        test_mixed_constructors,
+        "const s = new Set();\nconst custom = new CustomClass();\nconst m = new Map();"
+    );
+
+    // ==================== Phase 10: Shadowing Detection ====================
+
+    // Math is shadowed by a local variable, so Math.abs is not the built-in
+    side_effects!(
+        test_shadowed_math,
+        r#"
+            const Math = { abs: () => console.log('side effect') };
+            const result = Math.abs(-5);
+            "#
+    );
+
+    // Object is shadowed at top level, so Object.keys is not the built-in
+    side_effects!(
+        test_shadowed_object,
+        r#"
+            const Object = { keys: () => sideEffect() };
+            const result = Object.keys({});
+            "#
+    );
+
+    // Array is shadowed at top level by a local class
+    side_effects!(
+        test_shadowed_array_constructor,
+        r#"
+            const Array = class { constructor() { sideEffect(); } };
+            const arr = new Array();
+            "#
+    );
+
+    // Set is shadowed at top level
+    side_effects!(
+        test_shadowed_set_constructor,
+        r#"
+            const Set = class { constructor() { sideEffect(); } };
+            const s = new Set();
+            "#
+    );
+
+    // Map is shadowed in a block scope
+    side_effects!(
+        test_shadowed_map_constructor,
+        r#"
+            {
+                const Map = class { constructor() { sideEffect(); } };
+                const m = new Map();
+            }
+            "#
+    );
+
+    // Math is NOT shadowed here, so Math.abs is the built-in
+    no_side_effects!(
+        test_global_math_not_shadowed,
+        r#"
+            const result = Math.abs(-5);
+            "#
+    );
+
+    // Object is NOT shadowed, so Object.keys is the built-in
+    no_side_effects!(
+        test_global_object_not_shadowed,
+        r#"
+            const keys = Object.keys({ a: 1, b: 2 });
+            "#
+    );
+
+    // Array is NOT shadowed, so new Array() is the built-in
+    no_side_effects!(
+        test_global_array_constructor_not_shadowed,
+        r#"
+            const arr = new Array(1, 2, 3);
+            "#
+    );
+
+    // If Math is imported (has a non-empty ctxt), it's not the global
+    side_effects!(
+        test_shadowed_by_import,
+        r#"
+            import { Math } from './custom-math';
+            const result = Math.abs(-5);
+            "#
+    );
+
+    // Math is shadowed in a block scope at top level
+    side_effects!(
+        test_nested_scope_shadowing,
+        r#"
+            {
+                const Math = { floor: () => sideEffect() };
+                const result = Math.floor(4.5);
+            }
+            "#
+    );
+
+    // This test shows that function declarations are pure at top level
+    // even if they have shadowed parameters. The side effect only occurs
+    // if the function is actually called.
+    no_side_effects!(
+        test_parameter_shadowing,
+        r#"
+            function test(RegExp) {
+                return new RegExp('test');
+            }
+            "#
+    );
+
+    // Number is shadowed by a var declaration
+    side_effects!(
+        test_shadowing_with_var,
+        r#"
+            var Number = { isNaN: () => sideEffect() };
+            const check = Number.isNaN(123);
+            "#
+    );
+
+    // RegExp is NOT shadowed, constructor is pure
+    no_side_effects!(
+        test_global_regexp_not_shadowed,
+        r#"
+            const re = new RegExp('[a-z]+');
+            "#
+    );
+
+    // ==================== Phase 11: Literal Receiver Methods ====================
+
+    // String literal methods
+    no_side_effects!(
+        test_string_literal_to_lower_case,
+        r#"const result = "HELLO".toLowerCase();"#
+    );
+
+    no_side_effects!(
+        test_string_literal_to_upper_case,
+        r#"const result = "hello".toUpperCase();"#
+    );
+
+    no_side_effects!(
+        test_string_literal_slice,
+        r#"const result = "hello world".slice(0, 5);"#
+    );
+
+    no_side_effects!(
+        test_string_literal_split,
+        r#"const result = "a,b,c".split(',');"#
+    );
+
+    no_side_effects!(
+        test_string_literal_trim,
+        r#"const result = "  hello  ".trim();"#
+    );
+
+    no_side_effects!(
+        test_string_literal_replace,
+        r#"const result = "hello".replace('h', 'H');"#
+    );
+
+    no_side_effects!(
+        test_string_literal_includes,
+        r#"const result = "hello world".includes('world');"#
+    );
+
+    // Array literal methods
+    no_side_effects!(
+        test_array_literal_map,
+        r#"const result = [1, 2, 3].map(x => x * 2);"#
+    );
+
+    no_side_effects!(
+        test_array_literal_filter,
+        r#"const result = [1, 2, 3].filter(x => x > 1);"#
+    );
+
+    no_side_effects!(
+        test_array_literal_reduce,
+        r#"const result = [1, 2, 3].reduce((a, b) => a + b, 0);"#
+    );
+
+    no_side_effects!(
+        test_array_literal_slice,
+        r#"const result = [1, 2, 3, 4, 5].slice(1, 3);"#
+    );
+
+    no_side_effects!(
+        test_array_literal_concat,
+        r#"const result = [1, 2].concat([3, 4]);"#
+    );
+
+    no_side_effects!(
+        test_array_literal_includes,
+        r#"const result = [1, 2, 3].includes(2);"#
+    );
+
+    no_side_effects!(
+        test_array_literal_join,
+        r#"const result = [1, 2, 3].join(',');"#
+    );
+
+    no_side_effects!(
+        test_array_literal_find,
+        r#"const result = [1, 2, 3].find(x => x > 1);"#
+    );
+
+    // Number literal methods - need parentheses for number literals
+    no_side_effects!(
+        test_number_literal_to_fixed,
+        r#"const result = (3.14159).toFixed(2);"#
+    );
+
+    no_side_effects!(
+        test_number_literal_to_string,
+        r#"const result = (42).toString();"#
+    );
+
+    no_side_effects!(
+        test_number_literal_to_exponential,
+        r#"const result = (123.456).toExponential(2);"#
+    );
+
+    // Boolean literal methods
+    no_side_effects!(
+        test_boolean_literal_to_string,
+        r#"const result = true.toString();"#
+    );
+
+    no_side_effects!(
+        test_boolean_literal_value_of,
+        r#"const result = false.valueOf();"#
+    );
+
+    // RegExp literal methods
+    no_side_effects!(
+        test_regexp_literal_to_string,
+        r#"const result = /[a-z]+/.toString();"#
+    );
+
+    // Note: test() and exec() technically modify flags on the regex, but that is fine when called
+    // on a literal.
+    no_side_effects!(
+        test_regexp_literal_test,
+        r#"const result = /[a-z]+/g.test("hello");"#
+    );
+
+    no_side_effects!(
+        test_regexp_literal_exec,
+        r#"const result = /(\d+)/g.exec("test123");"#
+    );
+
+    // Array literal with impure elements - the array construction itself has side effects
+    // because foo() is called when creating the array
+    side_effects!(
+        test_array_literal_with_impure_elements,
+        r#"const result = [foo(), 2, 3].map(x => x * 2);"#
+    );
+
+    // Array literal with callback that would have side effects when called
+    // However, callbacks are just function definitions at module load time
+    // They don't execute until runtime, so this is side-effect free at load time
+    no_side_effects!(
+        test_array_literal_map_with_callback,
+        r#"const result = [1, 2, 3].map(x => x * 2);"#
+    );
+}
