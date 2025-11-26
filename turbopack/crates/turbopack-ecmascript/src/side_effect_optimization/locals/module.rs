@@ -10,7 +10,7 @@ use turbopack_core::{
         MergeableModulesExposed,
     },
     ident::AssetIdent,
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::ModuleGraph,
     reference::ModuleReferences,
     resolve::ModulePart,
@@ -73,9 +73,8 @@ impl Module for EcmascriptModuleLocalsModule {
     }
 
     #[turbo_tasks::function]
-    fn is_marked_as_side_effect_free(&self, side_effect_free_packages: Vc<Glob>) -> Vc<bool> {
-        self.module
-            .is_marked_as_side_effect_free(side_effect_free_packages)
+    fn side_effects(&self, side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        self.module.side_effects(side_effect_free_packages)
     }
 }
 

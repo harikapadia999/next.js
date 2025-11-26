@@ -1,13 +1,14 @@
 use turbo_tasks::{ResolvedVc, Vc};
+use turbo_tasks_fs::glob::Glob;
 
 use crate::{
     asset::{Asset, AssetContent},
     ident::AssetIdent,
-    module::Module,
+    module::{Module, ModuleSideEffects},
     source::{OptionSource, Source},
 };
 
-/// A module where source code doesn't need to be parsed but can be usd as is.
+/// A module where source code doesn't need to be parsed but can be used as is.
 /// This module has no references to other modules.
 #[turbo_tasks::value]
 pub struct RawModule {
@@ -24,6 +25,10 @@ impl Module for RawModule {
     #[turbo_tasks::function]
     fn source(&self) -> Vc<OptionSource> {
         Vc::cell(Some(self.source))
+    }
+    #[turbo_tasks::function]
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        ModuleSideEffects::SideEffectful.cell()
     }
 }
 

@@ -1,14 +1,14 @@
 use anyhow::Result;
 use turbo_rcstr::rcstr;
 use turbo_tasks::{IntoTraitRef, ResolvedVc, TryJoinIterExt, ValueToString, Vc};
-use turbo_tasks_fs::{FileContent, FileSystemPath};
+use turbo_tasks_fs::{FileContent, FileSystemPath, glob::Glob};
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{ChunkItem, ChunkType, ChunkableModule, ChunkingContext, MinifyType},
     context::AssetContext,
     environment::Environment,
     ident::AssetIdent,
-    module::{Module, StyleModule, StyleType},
+    module::{Module, ModuleSideEffects, StyleModule, StyleType},
     module_graph::ModuleGraph,
     output::{OutputAssetsReference, OutputAssetsWithReferenced},
     reference::{ModuleReference, ModuleReferences},
@@ -152,6 +152,11 @@ impl Module for CssModuleAsset {
             ParseCssResult::Unparsable => Ok(ModuleReferences::empty()),
             ParseCssResult::NotFound => Ok(ModuleReferences::empty()),
         }
+    }
+    #[turbo_tasks::function]
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        // global css is always a side effect
+        ModuleSideEffects::SideEffectful.cell()
     }
 }
 

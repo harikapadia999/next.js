@@ -7,7 +7,7 @@ use turbopack_core::{
     chunk::{AsyncModuleInfo, ChunkableModule, ChunkingContext, EvaluatableAsset},
     context::AssetContext,
     ident::AssetIdent,
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::ModuleGraph,
     reference::{ModuleReference, ModuleReferences, SingleChunkableModuleReference},
     resolve::{ExportUsage, ModulePart, origin::ResolveOrigin},
@@ -264,8 +264,9 @@ async fn follow_reexports_with_side_effects(
     let mut current_export_name = export_name;
     let result = loop {
         let is_side_effect_free = *current_module
-            .is_marked_as_side_effect_free(side_effect_free_packages)
-            .await?;
+            .side_effects(side_effect_free_packages)
+            .await?
+            == ModuleSideEffects::DeclaredSideEffectFree;
 
         if !is_side_effect_free {
             side_effects.push(only_effects(*current_module).to_resolved().await?);
@@ -353,15 +354,12 @@ impl Module for EcmascriptModulePartAsset {
     }
 
     #[turbo_tasks::function]
-    async fn is_marked_as_side_effect_free(
-        &self,
-        side_effect_free_packages: Vc<Glob>,
-    ) -> Result<Vc<bool>> {
+    async fn side_effects(&self, side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
         match self.part {
-            ModulePart::Exports | ModulePart::Export(..) => Ok(Vc::cell(true)),
-            _ => Ok(self
-                .full_module
-                .is_marked_as_side_effect_free(side_effect_free_packages)),
+            ModulePart::Exports | ModulePart::Export(..) => {
+                ModuleSideEffects::DeclaredSideEffectFree.cell()
+            }
+            _ => self.full_module.side_effects(side_effect_free_packages),
         }
     }
 }

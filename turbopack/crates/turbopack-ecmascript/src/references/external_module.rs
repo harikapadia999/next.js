@@ -14,7 +14,7 @@ use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{AsyncModuleInfo, ChunkItem, ChunkType, ChunkableModule, ChunkingContext},
     ident::{AssetIdent, Layer},
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::ModuleGraph,
     output::{
         OutputAsset, OutputAssets, OutputAssetsReference, OutputAssetsReferences,
@@ -382,11 +382,8 @@ impl Module for CachedExternalModule {
     }
 
     #[turbo_tasks::function]
-    fn is_marked_as_side_effect_free(
-        self: Vc<Self>,
-        _side_effect_free_packages: Vc<Glob>,
-    ) -> Vc<bool> {
-        Vc::cell(false)
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        ModuleSideEffects::SideEffectful.cell()
     }
 }
 
@@ -571,6 +568,10 @@ impl Module for ModuleWithoutSelfAsync {
         self.module.references()
     }
 
+    #[turbo_tasks::function]
+    fn side_effects(&self, side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        self.module.side_effects(side_effect_free_packages)
+    }
     // Don't override and use default is_self_async that always returns false
 }
 

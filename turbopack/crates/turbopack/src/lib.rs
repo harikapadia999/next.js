@@ -28,7 +28,7 @@ use turbopack_core::{
     context::{AssetContext, ProcessResult},
     ident::Layer,
     issue::{IssueExt, IssueSource, module::ModuleIssue},
-    module::Module,
+    module::{Module, ModuleSideEffects},
     node_addon_module::NodeAddonModule,
     output::{ExpandedOutputAssets, OutputAsset},
     raw_module::RawModule,
@@ -182,9 +182,8 @@ async fn apply_module_type(
                         .resolve()
                         .await?;
 
-                    if *module
-                        .is_marked_as_side_effect_free(side_effect_free_packages)
-                        .await?
+                    if *module.side_effects(side_effect_free_packages).await?
+                        == ModuleSideEffects::DeclaredSideEffectFree
                     {
                         return Ok(ProcessResult::Ignore.cell());
                     }
@@ -316,9 +315,8 @@ async fn apply_module_type(
             .resolve()
             .await?;
 
-        if *module
-            .is_marked_as_side_effect_free(side_effect_free_packages)
-            .await?
+        if *module.side_effects(side_effect_free_packages).await?
+            == ModuleSideEffects::DeclaredSideEffectFree
         {
             return Ok(ProcessResult::Ignore.cell());
         }

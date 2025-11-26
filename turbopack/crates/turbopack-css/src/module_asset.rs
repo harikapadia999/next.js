@@ -6,7 +6,7 @@ use lightningcss::css_modules::CssModuleReference;
 use swc_core::common::{BytePos, FileName, LineCol, SourceMap};
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{FxIndexMap, IntoTraitRef, ResolvedVc, ValueToString, Vc};
-use turbo_tasks_fs::{FileSystemPath, rope::Rope};
+use turbo_tasks_fs::{FileSystemPath, glob::Glob, rope::Rope};
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{ChunkItem, ChunkType, ChunkableModule, ChunkingContext, ModuleChunkItemIdExt},
@@ -16,7 +16,7 @@ use turbopack_core::{
         Issue, IssueExt, IssueSeverity, IssueSource, IssueStage, OptionIssueSource,
         OptionStyledString, StyledString,
     },
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::ModuleGraph,
     output::OutputAssetsReference,
     reference::{ModuleReference, ModuleReferences},
@@ -110,6 +110,13 @@ impl Module for ModuleCssAsset {
             .collect();
 
         Ok(Vc::cell(references))
+    }
+
+    #[turbo_tasks::function]
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        // modules can still effect global styles using `:root` selectors and other similar features
+        // We could do better with some static analysis if we want
+        ModuleSideEffects::SideEffectful.cell()
     }
 }
 

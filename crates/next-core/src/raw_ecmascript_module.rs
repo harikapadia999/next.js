@@ -18,7 +18,7 @@ use turbopack_core::{
     },
     context::AssetContext,
     ident::AssetIdent,
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::ModuleGraph,
     output::OutputAssetsReference,
     resolve::ModulePart,
@@ -99,11 +99,9 @@ impl Module for RawEcmascriptModule {
     }
 
     #[turbo_tasks::function]
-    fn is_marked_as_side_effect_free(
-        self: Vc<Self>,
-        _side_effect_free_packages: Vc<Glob>,
-    ) -> Vc<bool> {
-        Vc::cell(false)
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        // Is this correct?
+        ModuleSideEffects::DeclaredSideEffectFree.cell()
     }
 }
 

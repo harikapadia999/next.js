@@ -4,12 +4,12 @@ use anyhow::Result;
 use indoc::formatdoc;
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{ResolvedVc, Vc};
-use turbo_tasks_fs::FileContent;
+use turbo_tasks_fs::{FileContent, glob::Glob};
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{ChunkItem, ChunkType, ChunkableModule, ChunkingContext, ModuleChunkItemIdExt},
     ident::AssetIdent,
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::ModuleGraph,
     output::OutputAssetsReference,
     reference::{ModuleReferences, SingleChunkableModuleReference},
@@ -70,6 +70,11 @@ impl Module for NextDynamicEntryModule {
             .to_resolved()
             .await?,
         )]))
+    }
+    #[turbo_tasks::function]
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        // This just exports another import
+        ModuleSideEffects::ModuleEvaluationIsSideEffectFree.cell()
     }
 }
 

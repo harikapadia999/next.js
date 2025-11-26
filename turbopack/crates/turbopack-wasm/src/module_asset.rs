@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use turbo_rcstr::rcstr;
 use turbo_tasks::{IntoTraitRef, ResolvedVc, Vc, fxindexmap};
-use turbo_tasks_fs::FileSystemPath;
+use turbo_tasks_fs::{FileSystemPath, glob::Glob};
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{
@@ -10,7 +10,7 @@ use turbopack_core::{
     },
     context::AssetContext,
     ident::AssetIdent,
-    module::{Module, OptionModule},
+    module::{Module, ModuleSideEffects, OptionModule},
     module_graph::ModuleGraph,
     output::{OutputAssetsReference, OutputAssetsWithReferenced},
     reference::{ModuleReferences, SingleChunkableModuleReference},
@@ -143,6 +143,14 @@ impl Module for WebAssemblyModuleAsset {
     #[turbo_tasks::function]
     fn is_self_async(self: Vc<Self>) -> Vc<bool> {
         Vc::cell(true)
+    }
+
+    #[turbo_tasks::function]
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        // Both versions of this module have a top level await that instantiates a wasm module
+        // wasm module instantiation can trigger arbitrary side effects from the native start
+        // function
+        ModuleSideEffects::SideEffectful.cell()
     }
 }
 

@@ -9,7 +9,7 @@ use turbopack_core::{
         ChunkingTypeOption,
     },
     ident::AssetIdent,
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::ModuleGraph,
     reference::{ModuleReference, ModuleReferences},
     resolve::ModuleResolveResult,
@@ -59,11 +59,8 @@ impl Module for WorkerLoaderModule {
     }
 
     #[turbo_tasks::function]
-    fn is_marked_as_side_effect_free(
-        self: Vc<Self>,
-        _side_effect_free_packages: Vc<Glob>,
-    ) -> Vc<bool> {
-        Vc::cell(true)
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        ModuleSideEffects::DeclaredSideEffectFree.cell()
     }
 }
 

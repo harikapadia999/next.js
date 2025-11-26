@@ -118,7 +118,10 @@ pub use turbopack_resolve::ecmascript as resolve;
 use self::chunk::{EcmascriptChunkItemContent, EcmascriptChunkType, EcmascriptExports};
 use crate::{
     analyzer::graph::EvalContext,
-    chunk::{EcmascriptChunkPlaceable, placeable::is_marked_as_side_effect_free},
+    chunk::{
+        EcmascriptChunkPlaceable,
+        placeable::{SideEffectsDeclaration, get_side_effect_free_declaration},
+    },
     code_gen::{CodeGens, ModifiableAst},
     merged_module::MergedEcmascriptModule,
     parse::generate_js_source_map,
@@ -766,20 +769,23 @@ impl Module for EcmascriptModuleAsset {
     }
 
     #[turbo_tasks::function]
-    async fn is_marked_as_side_effect_free(
+    async fn side_effects(
         self: Vc<Self>,
         side_effect_free_packages: Vc<Glob>,
-    ) -> Result<Vc<bool>> {
+    ) -> Result<Vc<ModuleSideEffects>> {
         // Check package.json first, so that we can skip parsing the module if it's marked that way.
-        let pkg_side_effect_free = is_marked_as_side_effect_free(
+        // We need to respect package.json configuration over any static analysis we might do.
+        Ok((match *get_side_effect_free_declaration(
             self.ident().path().owned().await?,
             side_effect_free_packages,
-        );
-        Ok(if *pkg_side_effect_free.await? {
-            pkg_side_effect_free
-        } else {
-            Vc::cell(self.analyze().await?.side_effects == ModuleSideEffects::SideEffectFree)
+        )
+        .await?
+        {
+            SideEffectsDeclaration::SideEffectful => ModuleSideEffects::SideEffectful,
+            SideEffectsDeclaration::SideEffectFree => ModuleSideEffects::SideEffectFree,
+            SideEffectsDeclaration::None => self.analyze().await?.side_effects,
         })
+        .cell())
     }
 }
 

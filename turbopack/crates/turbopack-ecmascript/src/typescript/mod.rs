@@ -2,11 +2,11 @@ use anyhow::Result;
 use serde_json::Value as JsonValue;
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{ResolvedVc, TryJoinIterExt, ValueToString, Vc};
-use turbo_tasks_fs::DirectoryContent;
+use turbo_tasks_fs::{DirectoryContent, glob::Glob};
 use turbopack_core::{
     asset::{Asset, AssetContent},
     ident::AssetIdent,
-    module::Module,
+    module::{Module, ModuleSideEffects},
     raw_module::RawModule,
     reference::{ModuleReference, ModuleReferences},
     reference_type::{CommonJsReferenceSubType, ReferenceType},
@@ -172,6 +172,11 @@ impl Module for TsConfigModuleAsset {
             }
         }
         Ok(Vc::cell(references))
+    }
+
+    #[turbo_tasks::function]
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        ModuleSideEffects::SideEffectful.cell()
     }
 }
 

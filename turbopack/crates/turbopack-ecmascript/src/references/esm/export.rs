@@ -21,7 +21,7 @@ use turbopack_core::{
     chunk::{ChunkingContext, ModuleChunkItemIdExt},
     ident::AssetIdent,
     issue::{IssueExt, IssueSeverity, StyledString, analyze::AnalyzeIssue},
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::binding_usage_info::ModuleExportUsageInfo,
     reference::ModuleReference,
     resolve::ModulePart,
@@ -208,9 +208,8 @@ pub async fn follow_reexports(
         };
 
         if !ignore_side_effects
-            && !*module
-                .is_marked_as_side_effect_free(side_effect_free_packages)
-                .await?
+            && *module.side_effects(side_effect_free_packages).await?
+                != ModuleSideEffects::DeclaredSideEffectFree
         {
             // TODO It's unfortunate that we have to use the whole module here.
             // This is often the Facade module, which includes all reexports.

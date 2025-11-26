@@ -5,7 +5,7 @@ use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::ChunkingContext,
     ident::AssetIdent,
-    module::Module,
+    module::{Module, ModuleSideEffects},
     output::OutputAsset,
     source::Source,
 };
@@ -53,11 +53,8 @@ impl Module for StaticUrlCssModule {
     }
 
     #[turbo_tasks::function]
-    fn is_marked_as_side_effect_free(
-        self: Vc<Self>,
-        _side_effect_free_packages: Vc<Glob>,
-    ) -> Vc<bool> {
-        Vc::cell(true)
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        ModuleSideEffects::DeclaredSideEffectFree.cell()
     }
 }
 

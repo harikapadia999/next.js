@@ -1,0 +1,9 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 4, "column": 0}, "map": {"version":3,"sources":[],"names":[],"mappings":""}},
+    {"offset": {"line": 16, "column": 0}, "map": {"version":3,"sources":["turbopack:///[project]/turbopack/crates/turbopack-tests/tests/snapshot/source_maps/merged-unicode/input/index1.js"],"sourcesContent":["import \"./entry-base.js\";\n"],"names":[],"mappings":";AAAA"}},
+    {"offset": {"line": 23, "column": 0}, "map": {"version":3,"sources":["turbopack:///[project]/turbopack/crates/turbopack-tests/tests/snapshot/source_maps/merged-unicode/input/index2.js"],"sourcesContent":["import \"./entry-base.js\";\n"],"names":[],"mappings":";AAAA"}},
+    {"offset": {"line": 29, "column": 0}, "map": {"version":3,"sources":["turbopack:///[project]/turbopack/crates/turbopack-tests/tests/snapshot/source_maps/merged-unicode/input/index.js"],"sourcesContent":["// \"entry-base.js [app-rsc] (ecmascript) <module evaluation>\" with\n// [\"reflect-utils.js [app-rsc] (ecmascript)\",\n// \"params.js [app-rsc] (ecmascript)\",\n// \"segment-value-encoding.js [app-rsc] (ecmascript)\",\n// \"collect-segment-data.js [app-rsc] (ecmascript)\",\n// \"entry-base.js [app-rsc] (ecmascript) <locals>\"]\n\n// \"entry-base.js [test] (ecmascript) <module evaluation>\" with\n// [\"reflect-utils.js [test] (ecmascript)\",\n// \"params.js [test] (ecmascript)\",\n// \"segment-value-encoding.js [test] (ecmascript)\",\n//  \"collect-segment-data.js [test] (ecmascript)\",\n//  \"entry-base.js [test] (ecmascript) <locals>\"]\n\nif (Date.now() > 0) {\n  require('./index1.js')\n}\nif (Date.now() > 0) {\n  require('./index2.js')\n}\n\n"],"names":[],"mappings":"AAAA,kEAAkE;AAClE,8CAA8C;AAC9C,sCAAsC;AACtC,sDAAsD;AACtD,oDAAoD;AACpD,mDAAmD;AAEnD,+DAA+D;AAC/D,2CAA2C;AAC3C,mCAAmC;AACnC,mDAAmD;AACnD,kDAAkD;AAClD,iDAAiD;AAEjD,IAAI,KAAK,GAAG,KAAK,GAAG;;AAEpB;AACA,IAAI,KAAK,GAAG,KAAK,GAAG;;AAEpB"}}]
+}

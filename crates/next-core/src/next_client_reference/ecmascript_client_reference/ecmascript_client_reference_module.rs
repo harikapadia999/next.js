@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use indoc::writedoc;
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{IntoTraitRef, ResolvedVc, ValueToString, Vc};
-use turbo_tasks_fs::{File, FileContent};
+use turbo_tasks_fs::{File, FileContent, glob::Glob};
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{
@@ -14,7 +14,7 @@ use turbopack_core::{
     code_builder::CodeBuilder,
     context::AssetContext,
     ident::AssetIdent,
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::{ModuleGraph, binding_usage_info::ModuleExportUsageInfo},
     output::OutputAssetsReference,
     reference::{ModuleReference, ModuleReferences},
@@ -240,6 +240,11 @@ impl Module for EcmascriptClientReferenceModule {
             .collect();
 
         Ok(Vc::cell(references))
+    }
+    #[turbo_tasks::function]
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        // These just export some specially tagged functions
+        ModuleSideEffects::DeclaredSideEffectFree.cell()
     }
 }
 

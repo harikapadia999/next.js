@@ -1,12 +1,13 @@
 use anyhow::{Result, bail};
 use turbo_rcstr::rcstr;
 use turbo_tasks::{IntoTraitRef, ResolvedVc, Vc};
+use turbo_tasks_fs::glob::Glob;
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{ChunkItem, ChunkType, ChunkableModule, ChunkingContext},
     context::AssetContext,
     ident::AssetIdent,
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::ModuleGraph,
     output::{OutputAsset, OutputAssetsReference, OutputAssetsWithReferenced},
     source::{OptionSource, Source},
@@ -63,6 +64,12 @@ impl Module for RawWebAssemblyModuleAsset {
     #[turbo_tasks::function]
     fn source(&self) -> Vc<OptionSource> {
         Vc::cell(Some(ResolvedVc::upcast(self.source)))
+    }
+
+    #[turbo_tasks::function]
+    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+        // this just exports a path
+        ModuleSideEffects::DeclaredSideEffectFree.cell()
     }
 }
 

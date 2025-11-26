@@ -22,7 +22,7 @@ use turbopack_core::{
         Issue, IssueExt, IssueSeverity, IssueSource, IssueStage, OptionIssueSource,
         OptionStyledString, StyledString,
     },
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::binding_usage_info::ModuleExportUsageInfo,
     reference::ModuleReference,
     reference_type::{EcmaScriptModulesReferenceSubType, ImportWithType},
@@ -428,10 +428,8 @@ impl ModuleReference for EsmAssetReference {
                 let side_effect_free_packages =
                     self.module.asset_context().side_effect_free_packages();
 
-                if *self
-                    .module
-                    .is_marked_as_side_effect_free(side_effect_free_packages)
-                    .await?
+                if *self.module.side_effects(side_effect_free_packages).await?
+                    == ModuleSideEffects::DeclaredSideEffectFree
                 {
                     return Ok(ModuleResolveResult {
                         primary: Box::new([(

@@ -1954,12 +1954,12 @@ pub mod tests {
     use turbo_rcstr::{RcStr, rcstr};
     use turbo_tasks::{ResolvedVc, TryJoinIterExt, ValueToString, Vc};
     use turbo_tasks_backend::{BackendOptions, TurboTasksBackend, noop_backing_storage};
-    use turbo_tasks_fs::{FileSystem, FileSystemPath, VirtualFileSystem};
+    use turbo_tasks_fs::{FileSystem, FileSystemPath, VirtualFileSystem, glob::Glob};
 
     use crate::{
         asset::{Asset, AssetContent},
         ident::AssetIdent,
-        module::Module,
+        module::{Module, ModuleSideEffects},
         module_graph::{
             GraphEntries, GraphTraversalAction, ModuleGraph, ModuleGraphRef, SingleModuleGraph,
             VisitedModules, chunk_group_info::ChunkGroupEntry,
@@ -2356,6 +2356,13 @@ pub mod tests {
             };
 
             Ok(Vc::cell(references))
+        }
+        #[turbo_tasks::function]
+        fn side_effects(
+            self: Vc<Self>,
+            _side_effect_free_packages: Vc<Glob>,
+        ) -> Vc<ModuleSideEffects> {
+            ModuleSideEffects::SideEffectful.cell()
         }
     }
 

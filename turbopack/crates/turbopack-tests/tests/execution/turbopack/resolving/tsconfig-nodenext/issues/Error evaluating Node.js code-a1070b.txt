@@ -1,0 +1,26 @@
+error - [transform] /turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/input/index.js  Error evaluating Node.js code
+  
+  Error: Should have a lower precedence than foo.ts
+      at module evaluation (turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/input/src/foo.js:1:7) [WORKSPACE_ROOT/turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/output/bf321_tests_execution_turbopack_resolving_tsconfig-nodenext_input_490cd2a4._.js:4:7]
+         |       v
+       1 + throw new Error('Should have a lower precedence than foo.ts')
+         |       ^
+       2 | 
+  
+      at instantiateModule (turbopack:///[turbopack]/nodejs/runtime.ts:228:5) [WORKSPACE_ROOT/turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/output/[turbopack]_runtime.js:715:9]
+      at getOrInstantiateModuleFromParent (turbopack:///[turbopack]/nodejs/runtime.ts:261:10) [WORKSPACE_ROOT/turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/output/[turbopack]_runtime.js:738:12]
+      at Context.esmImport [as i] (turbopack:///[turbopack]/shared/runtime-utils.ts:347:18) [WORKSPACE_ROOT/turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/output/[turbopack]_runtime.js:228:20]
+      at module evaluation (turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/input/index.js:1:1) [WORKSPACE_ROOT/turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/output/bf321_tests_execution_turbopack_resolving_tsconfig-nodenext_input_490cd2a4._.js:11:256]
+         | v
+       1 + import foo from './src/foo.js'
+         | ^
+       2 | // import fileTsx from './src/file-tsx.js'
+       3 | // import fileMts from './src/file-mts.mjs'
+       4 | // import fileCts from './src/file-cts.cjs'
+       5 | // import fileMjs from './src/file-mjs.mjs'
+  
+      at instantiateModule (turbopack:///[turbopack]/nodejs/runtime.ts:228:5) [WORKSPACE_ROOT/turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/output/[turbopack]_runtime.js:715:9]
+      at getOrInstantiateModuleFromParent (turbopack:///[turbopack]/nodejs/runtime.ts:261:10) [WORKSPACE_ROOT/turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/output/[turbopack]_runtime.js:738:12]
+      at Context.esmImport [as i] (turbopack:///[turbopack]/shared/runtime-utils.ts:347:18) [WORKSPACE_ROOT/turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/output/[turbopack]_runtime.js:228:20]
+      [at WORKSPACE_ROOT/turbopack/crates/turbopack-tests/tests/execution/turbopack/resolving/tsconfig-nodenext/output/bf321_tests_execution_turbopack_resolving_tsconfig-nodenext_input_index_ea864b75.js:8:16]
+      [at process.processTicksAndRejections (node:internal/process/task_queues:95:5)]
