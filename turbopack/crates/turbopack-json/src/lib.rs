@@ -14,7 +14,7 @@ use std::fmt::Write;
 use anyhow::{Error, Result, bail};
 use turbo_rcstr::rcstr;
 use turbo_tasks::{ResolvedVc, ValueToString, Vc};
-use turbo_tasks_fs::{FileContent, FileJsonContent, glob::Glob};
+use turbo_tasks_fs::{FileContent, FileJsonContent};
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{ChunkItem, ChunkType, ChunkableModule, ChunkingContext},
@@ -59,7 +59,7 @@ impl Module for JsonModuleAsset {
     }
 
     #[turbo_tasks::function]
-    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+    fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
         ModuleSideEffects::DeclaredSideEffectFree.cell()
     }
 }

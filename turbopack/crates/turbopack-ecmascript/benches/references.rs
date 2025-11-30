@@ -5,7 +5,10 @@ use criterion::{BatchSize, Bencher, BenchmarkId, Criterion, criterion_group, cri
 use turbo_rcstr::rcstr;
 use turbo_tasks::{ResolvedVc, TurboTasks};
 use turbo_tasks_backend::{BackendOptions, TurboTasksBackend, noop_backing_storage};
-use turbo_tasks_fs::{DiskFileSystem, FileSystem};
+use turbo_tasks_fs::{
+    DiskFileSystem, FileSystem,
+    glob::{Glob, GlobOptions},
+};
 use turbopack_core::{
     compile_time_info::CompileTimeInfo,
     environment::{Environment, ExecutionEnvironment, NodeJsEnvironment},
@@ -77,6 +80,9 @@ async fn setup(
         layer,
     }
     .resolved_cell();
+    let side_effect_free_packages = Glob::new("".into(), GlobOptions::default())
+        .to_resolved()
+        .await?;
     let module = EcmascriptModuleAsset::builder(
         ResolvedVc::upcast(
             FileSource::new(fs.root().await?.join(file).unwrap())
@@ -96,6 +102,7 @@ async fn setup(
         }
         .resolved_cell(),
         compile_time_info,
+        side_effect_free_packages,
     )
     .build()
     .to_resolved()

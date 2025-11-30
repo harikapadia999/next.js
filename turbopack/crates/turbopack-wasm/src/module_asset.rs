@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use turbo_rcstr::rcstr;
 use turbo_tasks::{IntoTraitRef, ResolvedVc, Vc, fxindexmap};
-use turbo_tasks_fs::{FileSystemPath, glob::Glob};
+use turbo_tasks_fs::FileSystemPath;
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{
@@ -146,7 +146,7 @@ impl Module for WebAssemblyModuleAsset {
     }
 
     #[turbo_tasks::function]
-    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+    fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
         // Both versions of this module have a top level await that instantiates a wasm module
         // wasm module instantiation can trigger arbitrary side effects from the native start
         // function

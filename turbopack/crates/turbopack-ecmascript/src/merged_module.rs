@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use turbo_tasks::{ResolvedVc, Vc};
-use turbo_tasks_fs::glob::Glob;
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{
@@ -93,7 +92,7 @@ impl Module for MergedEcmascriptModule {
         panic!("is_self_async() should not be called");
     }
     #[turbo_tasks::function]
-    fn side_effects(&self, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+    fn side_effects(&self) -> Vc<ModuleSideEffects> {
         // If needed this could be computed by merging the effects from all the merged modules
         panic!("side_effects() should not be called");
     }

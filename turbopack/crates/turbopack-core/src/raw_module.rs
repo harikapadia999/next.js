@@ -1,5 +1,4 @@
 use turbo_tasks::{ResolvedVc, Vc};
-use turbo_tasks_fs::glob::Glob;
 
 use crate::{
     asset::{Asset, AssetContent},
@@ -27,7 +26,7 @@ impl Module for RawModule {
         Vc::cell(Some(self.source))
     }
     #[turbo_tasks::function]
-    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+    fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
         ModuleSideEffects::SideEffectful.cell()
     }
 }

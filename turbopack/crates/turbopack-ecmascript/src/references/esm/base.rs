@@ -17,7 +17,6 @@ use turbopack_core::{
         ChunkableModuleReference, ChunkingContext, ChunkingType, ChunkingTypeOption,
         ModuleChunkItemIdExt,
     },
-    context::AssetContext,
     issue::{
         Issue, IssueExt, IssueSeverity, IssueSource, IssueStage, OptionIssueSource,
         OptionStyledString, StyledString,
@@ -425,12 +424,7 @@ impl ModuleReference for EsmAssetReference {
 
         if let Some(TreeShakingMode::ModuleFragments) = self.tree_shaking_mode {
             if let Some(ModulePart::Evaluation) = &self.export_name {
-                let side_effect_free_packages =
-                    self.module.asset_context().side_effect_free_packages();
-
-                if *self.module.side_effects(side_effect_free_packages).await?
-                    == ModuleSideEffects::DeclaredSideEffectFree
-                {
+                if *self.module.side_effects().await? == ModuleSideEffects::DeclaredSideEffectFree {
                     return Ok(ModuleResolveResult {
                         primary: Box::new([(
                             RequestKey::default(),

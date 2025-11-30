@@ -7,7 +7,7 @@ use regex::Regex;
 use tracing::Instrument;
 use turbo_rcstr::rcstr;
 use turbo_tasks::{FxIndexMap, FxIndexSet, ResolvedVc, TryJoinIterExt, ValueToString, Vc};
-use turbo_tasks_fs::{FileContent, glob::Glob, rope::Rope};
+use turbo_tasks_fs::{FileContent, rope::Rope};
 use turbopack::{ModuleAssetContext, module_options::CustomModuleType};
 use turbopack_core::{
     asset::{Asset, AssetContent},
@@ -99,7 +99,7 @@ impl Module for RawEcmascriptModule {
     }
 
     #[turbo_tasks::function]
-    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+    fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
         // Is this correct?
         ModuleSideEffects::DeclaredSideEffectFree.cell()
     }

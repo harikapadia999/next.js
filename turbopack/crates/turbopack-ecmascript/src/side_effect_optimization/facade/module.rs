@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 use turbo_tasks::{ResolvedVc, Vc};
-use turbo_tasks_fs::{File, FileContent, glob::Glob};
+use turbo_tasks_fs::{File, FileContent};
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{
@@ -182,9 +182,9 @@ impl Module for EcmascriptModuleFacadeModule {
     }
 
     #[turbo_tasks::function]
-    fn side_effects(&self, side_effect_free_packages: Vc<Glob>) -> Result<Vc<ModuleSideEffects>> {
+    fn side_effects(&self) -> Result<Vc<ModuleSideEffects>> {
         Ok(match self.part {
-            ModulePart::Facade => self.module.side_effects(side_effect_free_packages),
+            ModulePart::Facade => self.module.side_effects(),
             ModulePart::RenamedExport { .. } | ModulePart::RenamedNamespace { .. } => {
                 ModuleSideEffects::DeclaredSideEffectFree.cell()
             }

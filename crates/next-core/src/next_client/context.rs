@@ -6,9 +6,14 @@ use serde::{Deserialize, Serialize};
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{ResolvedVc, TaskInput, Vc, trace::TraceRawVcs};
 use turbo_tasks_fs::FileSystemPath;
-use turbopack::module_options::{
-    CssOptionsContext, EcmascriptOptionsContext, JsxTransformOptions, ModuleRule,
-    TypescriptTransformOptions, module_options_context::ModuleOptionsContext,
+use turbopack::{
+    css::chunk::CssChunkType,
+    module_options::{
+        CssOptionsContext, EcmascriptOptionsContext, JsxTransformOptions, ModuleRule,
+        TypescriptTransformOptions, module_options_context::ModuleOptionsContext,
+        side_effect_free_packages_glob,
+    },
+    resolve_options_context::ResolveOptionsContext,
 };
 use turbopack_browser::{
     BrowserChunkingContext, ChunkSuffix, ContentHashing, CurrentChunkMethod,
@@ -337,7 +342,11 @@ pub async fn get_client_module_options_context(
         execution_context: Some(execution_context),
         tree_shaking_mode: tree_shaking_mode_for_user_code,
         enable_postcss_transform,
-        side_effect_free_packages: next_config.optimize_package_imports().owned().await?,
+        side_effect_free_packages: Some(
+            side_effect_free_packages_glob(next_config.optimize_package_imports())
+                .to_resolved()
+                .await?,
+        ),
         keep_last_successful_parse: next_mode.is_development(),
         analyze_mode: if next_mode.is_development() {
             AnalyzeMode::CodeGeneration

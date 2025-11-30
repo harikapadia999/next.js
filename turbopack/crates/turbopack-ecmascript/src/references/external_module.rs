@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{NonLocalValue, ResolvedVc, TaskInput, TryJoinIterExt, Vc, trace::TraceRawVcs};
 use turbo_tasks_fs::{
-    FileContent, FileSystem, FileSystemPath, LinkType, VirtualFileSystem, glob::Glob,
-    rope::RopeBuilder,
+    FileContent, FileSystem, FileSystemPath, LinkType, VirtualFileSystem, rope::RopeBuilder,
 };
 use turbo_tasks_hash::{encode_hex, hash_xxh3_hash64};
 use turbopack_core::{
@@ -382,7 +381,7 @@ impl Module for CachedExternalModule {
     }
 
     #[turbo_tasks::function]
-    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+    fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
         ModuleSideEffects::SideEffectful.cell()
     }
 }
@@ -569,8 +568,8 @@ impl Module for ModuleWithoutSelfAsync {
     }
 
     #[turbo_tasks::function]
-    fn side_effects(&self, side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
-        self.module.side_effects(side_effect_free_packages)
+    fn side_effects(&self) -> Vc<ModuleSideEffects> {
+        self.module.side_effects()
     }
     // Don't override and use default is_self_async that always returns false
 }

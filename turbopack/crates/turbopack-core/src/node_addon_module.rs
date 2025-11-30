@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use regex::Regex;
 use turbo_rcstr::rcstr;
 use turbo_tasks::{FxIndexSet, ResolvedVc, TryJoinIterExt, Vc};
-use turbo_tasks_fs::{FileSystemEntryType, FileSystemPath, glob::Glob};
+use turbo_tasks_fs::{FileSystemEntryType, FileSystemPath};
 
 use crate::{
     asset::{Asset, AssetContent},
@@ -102,7 +102,7 @@ impl Module for NodeAddonModule {
     }
 
     #[turbo_tasks::function]
-    fn side_effects(self: Vc<Self>, _side_effect_free_packages: Vc<Glob>) -> Vc<ModuleSideEffects> {
+    fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
         ModuleSideEffects::SideEffectful.cell()
     }
 }

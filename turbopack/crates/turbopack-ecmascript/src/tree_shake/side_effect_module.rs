@@ -1,7 +1,7 @@
 use anyhow::Result;
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{ResolvedVc, TryJoinIterExt, Vc};
-use turbo_tasks_fs::{FileContent, glob::Glob};
+use turbo_tasks_fs::FileContent;
 use turbopack_core::{
     asset::{Asset, AssetContent},
     chunk::{ChunkableModule, ChunkingContext, EvaluatableAsset},
@@ -114,7 +114,7 @@ impl Module for SideEffectsModule {
     }
 
     #[turbo_tasks::function]
-    fn side_effects(self: Vc<Self>, _: Vc<Glob>) -> Vc<ModuleSideEffects> {
+    fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
         ModuleSideEffects::DeclaredSideEffectFree.cell()
     }
 }

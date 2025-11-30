@@ -21,6 +21,7 @@ use turbo_tasks_fs::{
     FileSystemPath,
     glob::{Glob, GlobOptions},
 };
+pub use turbopack_core::condition;
 use turbopack_core::{
     asset::Asset,
     chunk::SourceMapsType,
@@ -127,6 +128,10 @@ async fn apply_module_type(
             }
             .to_resolved()
             .await?;
+            let side_effect_free_packages = module_asset_context
+                .module_options_context()
+                .await?
+                .side_effect_free_packages;
             let mut builder = EcmascriptModuleAsset::builder(
                 source,
                 ResolvedVc::upcast(context_for_module),
@@ -140,6 +145,7 @@ async fn apply_module_type(
                     .compile_time_info()
                     .to_resolved()
                     .await?,
+                side_effect_free_packages,
             );
             match module_type {
                 ModuleType::Ecmascript { .. } => {
@@ -177,14 +183,7 @@ async fn apply_module_type(
                 if tree_shaking_mode.is_some() && is_evaluation {
                     // If we are tree shaking, skip the evaluation part if the module is marked as
                     // side effect free.
-                    let side_effect_free_packages = module_asset_context
-                        .side_effect_free_packages()
-                        .resolve()
-                        .await?;
-
-                    if *module.side_effects(side_effect_free_packages).await?
-                        == ModuleSideEffects::DeclaredSideEffectFree
-                    {
+                    if *module.side_effects().await? == ModuleSideEffects::DeclaredSideEffectFree {
                         return Ok(ProcessResult::Ignore.cell());
                     }
                 }
@@ -207,11 +206,6 @@ async fn apply_module_type(
                                     }
                                 }
                                 ModulePart::Export(_) => {
-                                    let side_effect_free_packages = module_asset_context
-                                        .side_effect_free_packages()
-                                        .resolve()
-                                        .await?;
-
                                     if *module.get_exports().split_locals_and_reexports().await? {
                                         apply_reexport_tree_shaking(
                                             Vc::upcast(
@@ -223,16 +217,11 @@ async fn apply_module_type(
                                                 .await?,
                                             ),
                                             part,
-                                            side_effect_free_packages,
                                         )
                                         .await?
                                     } else {
-                                        apply_reexport_tree_shaking(
-                                            Vc::upcast(*module),
-                                            part,
-                                            side_effect_free_packages,
-                                        )
-                                        .await?
+                                        apply_reexport_tree_shaking(Vc::upcast(*module), part)
+                                            .await?
                                     }
                                 }
                                 _ => bail!(
@@ -310,14 +299,7 @@ async fn apply_module_type(
     if tree_shaking_mode.is_some() && is_evaluation {
         // If we are tree shaking, skip the evaluation part if the module is marked as
         // side effect free.
-        let side_effect_free_packages = module_asset_context
-            .side_effect_free_packages()
-            .resolve()
-            .await?;
-
-        if *module.side_effects(side_effect_free_packages).await?
-            == ModuleSideEffects::DeclaredSideEffectFree
-        {
+        if *module.side_effects().await? == ModuleSideEffects::DeclaredSideEffectFree {
             return Ok(ProcessResult::Ignore.cell());
         }
     }
@@ -328,14 +310,13 @@ async fn apply_module_type(
 async fn apply_reexport_tree_shaking(
     module: Vc<Box<dyn EcmascriptChunkPlaceable>>,
     part: ModulePart,
-    side_effect_free_packages: Vc<Glob>,
 ) -> Result<Vc<Box<dyn Module>>> {
     if let ModulePart::Export(export) = &part {
         let FollowExportsResult {
             module: final_module,
             export_name: new_export,
             ..
-        } = &*follow_reexports(module, export.clone(), side_effect_free_packages, true).await?;
+        } = &*follow_reexports(module, export.clone(), true).await?;
         let module = if let Some(new_export) = new_export {
             if *new_export == *export {
                 Vc::upcast(**final_module)
@@ -1017,18 +998,6 @@ impl AssetContext for ModuleAssetContext {
                 ))
             },
         )
-    }
-
-    #[turbo_tasks::function]
-    async fn side_effect_free_packages(&self) -> Result<Vc<Glob>> {
-        let pkgs = &self.module_options_context.await?.side_effect_free_packages;
-
-        let mut globs = String::new();
-        globs.push_str("**/node_modules/{");
-        globs.push_str(&pkgs.join(","));
-        globs.push_str("}/**");
-
-        Ok(Glob::new(globs.into(), GlobOptions::default()))
     }
 }
 

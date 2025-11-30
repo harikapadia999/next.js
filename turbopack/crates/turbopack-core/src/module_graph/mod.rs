@@ -48,6 +48,7 @@ pub mod chunk_group_info;
 pub mod merged_modules;
 pub mod module_batch;
 pub(crate) mod module_batches;
+mod side_effect_module_info;
 pub(crate) mod style_groups;
 mod traced_di_graph;
 
@@ -1954,7 +1955,7 @@ pub mod tests {
     use turbo_rcstr::{RcStr, rcstr};
     use turbo_tasks::{ResolvedVc, TryJoinIterExt, ValueToString, Vc};
     use turbo_tasks_backend::{BackendOptions, TurboTasksBackend, noop_backing_storage};
-    use turbo_tasks_fs::{FileSystem, FileSystemPath, VirtualFileSystem, glob::Glob};
+    use turbo_tasks_fs::{FileSystem, FileSystemPath, VirtualFileSystem};
 
     use crate::{
         asset::{Asset, AssetContent},
@@ -2358,10 +2359,7 @@ pub mod tests {
             Ok(Vc::cell(references))
         }
         #[turbo_tasks::function]
-        fn side_effects(
-            self: Vc<Self>,
-            _side_effect_free_packages: Vc<Glob>,
-        ) -> Vc<ModuleSideEffects> {
+        fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
             ModuleSideEffects::SideEffectful.cell()
         }
     }
