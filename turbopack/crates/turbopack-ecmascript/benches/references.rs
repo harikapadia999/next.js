@@ -80,9 +80,7 @@ async fn setup(
         layer,
     }
     .resolved_cell();
-    let side_effect_free_packages = Glob::new("".into(), GlobOptions::default())
-        .to_resolved()
-        .await?;
+
     let module = EcmascriptModuleAsset::builder(
         ResolvedVc::upcast(
             FileSource::new(fs.root().await?.join(file).unwrap())
@@ -102,7 +100,7 @@ async fn setup(
         }
         .resolved_cell(),
         compile_time_info,
-        side_effect_free_packages,
+        None,
     )
     .build()
     .to_resolved()
