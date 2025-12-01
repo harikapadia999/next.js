@@ -677,7 +677,9 @@ impl<'a> Visit for SideEffectVisitor<'a> {
         }
 
         match decl {
-            // Import statements have no side effects (module loading is tracked separately)
+            // Import statements may have side effects, which could require full graph analysis
+            // Record that to decide if we can upgrade ModuleEvaluationIsSideEffectFree to
+            // SideEffectFree
             ModuleDecl::Import(_) => {
                 self.has_imports = true;
             }
