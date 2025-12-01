@@ -244,7 +244,7 @@ impl Module for EcmascriptClientReferenceModule {
     #[turbo_tasks::function]
     fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
         // These just export some specially tagged functions
-        ModuleSideEffects::DeclaredSideEffectFree.cell()
+        ModuleSideEffects::SideEffectFree.cell()
     }
 }
 

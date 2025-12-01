@@ -48,7 +48,7 @@ async fn compute_side_effect_free_module_info_single(
                 super::SingleModuleGraphNode::VisitedModule { idx: _, module } => (
                     *module,
                     if parent_side_effect_free_modules.contains(module) {
-                        ModuleSideEffects::DeclaredSideEffectFree
+                        ModuleSideEffects::SideEffectFree
                     } else {
                         ModuleSideEffects::SideEffectful
                     },
@@ -80,8 +80,7 @@ async fn compute_side_effect_free_module_info_single(
         |child, _parent, _s| {
             Ok(if let Some((child_module, _edge)) = child {
                 match module_side_effects.get(&child_module).unwrap() {
-                    ModuleSideEffects::SideEffectful
-                    | ModuleSideEffects::DeclaredSideEffectFree => {
+                    ModuleSideEffects::SideEffectful | ModuleSideEffects::SideEffectFree => {
                         // We have either already seen this or don't want to follow it
                         GraphTraversalAction::Exclude
                     }
@@ -104,7 +103,7 @@ async fn compute_side_effect_free_module_info_single(
         .into_iter()
         .filter_map(|(m, e)| match e {
             ModuleSideEffects::SideEffectful => None,
-            ModuleSideEffects::DeclaredSideEffectFree => Some(m),
+            ModuleSideEffects::SideEffectFree => Some(m),
             ModuleSideEffects::ModuleEvaluationIsSideEffectFree => {
                 if locally_side_effect_free_modules_that_have_side_effects.contains(&m) {
                     None

@@ -206,7 +206,7 @@ pub async fn follow_reexports(
         };
 
         if !ignore_side_effects
-            && *module.side_effects().await? != ModuleSideEffects::DeclaredSideEffectFree
+            && *module.side_effects().await? != ModuleSideEffects::SideEffectFree
         {
             // TODO It's unfortunate that we have to use the whole module here.
             // This is often the Facade module, which includes all reexports.

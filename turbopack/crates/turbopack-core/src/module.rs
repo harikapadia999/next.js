@@ -10,7 +10,7 @@ pub enum StyleType {
     GlobalStyle,
 }
 
-#[derive(Hash, Debug)]
+#[derive(Hash, Debug, Copy, Clone)]
 #[turbo_tasks::value(shared)]
 pub enum ModuleSideEffects {
     /// Analysis determined that the module evaluation is side effect free

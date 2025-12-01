@@ -424,7 +424,7 @@ impl ModuleReference for EsmAssetReference {
 
         if let Some(TreeShakingMode::ModuleFragments) = self.tree_shaking_mode {
             if let Some(ModulePart::Evaluation) = &self.export_name {
-                if *self.module.side_effects().await? == ModuleSideEffects::DeclaredSideEffectFree {
+                if *self.module.side_effects().await? == ModuleSideEffects::SideEffectFree {
                     return Ok(ModuleResolveResult {
                         primary: Box::new([(
                             RequestKey::default(),

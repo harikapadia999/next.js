@@ -68,7 +68,7 @@ impl Module for AsyncLoaderModule {
 
     #[turbo_tasks::function]
     fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
-        ModuleSideEffects::DeclaredSideEffectFree.cell()
+        ModuleSideEffects::SideEffectFree.cell()
     }
 }
 

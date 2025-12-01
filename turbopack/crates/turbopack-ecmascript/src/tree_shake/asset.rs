@@ -255,7 +255,7 @@ async fn follow_reexports_with_side_effects(
     let mut current_export_name = export_name;
     let result = loop {
         let is_side_effect_free =
-            *current_module.side_effects().await? == ModuleSideEffects::DeclaredSideEffectFree;
+            *current_module.side_effects().await? == ModuleSideEffects::SideEffectFree;
 
         if !is_side_effect_free {
             side_effects.push(only_effects(*current_module).to_resolved().await?);
@@ -341,7 +341,7 @@ impl Module for EcmascriptModulePartAsset {
     async fn side_effects(&self) -> Vc<ModuleSideEffects> {
         match self.part {
             ModulePart::Exports | ModulePart::Export(..) => {
-                ModuleSideEffects::DeclaredSideEffectFree.cell()
+                ModuleSideEffects::SideEffectFree.cell()
             }
             _ => self.full_module.side_effects(),
         }

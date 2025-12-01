@@ -186,7 +186,7 @@ impl Module for EcmascriptModuleFacadeModule {
         Ok(match self.part {
             ModulePart::Facade => self.module.side_effects(),
             ModulePart::RenamedExport { .. } | ModulePart::RenamedNamespace { .. } => {
-                ModuleSideEffects::DeclaredSideEffectFree.cell()
+                ModuleSideEffects::SideEffectFree.cell()
             }
             _ => bail!("Unexpected ModulePart for EcmascriptModuleFacadeModule"),
         })

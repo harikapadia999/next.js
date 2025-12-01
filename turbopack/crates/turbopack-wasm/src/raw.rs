@@ -68,7 +68,7 @@ impl Module for RawWebAssemblyModuleAsset {
     #[turbo_tasks::function]
     fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
         // this just exports a path
-        ModuleSideEffects::DeclaredSideEffectFree.cell()
+        ModuleSideEffects::SideEffectFree.cell()
     }
 }
 
