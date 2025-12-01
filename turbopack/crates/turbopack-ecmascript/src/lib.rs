@@ -100,7 +100,7 @@ use turbopack_core::{
     compile_time_info::CompileTimeInfo,
     context::AssetContext,
     ident::AssetIdent,
-    module::{Module, OptionModule},
+    module::{Module, ModuleSideEffects, OptionModule},
     module_graph::ModuleGraph,
     output::OutputAssetsReference,
     reference::ModuleReferences,
@@ -123,7 +123,7 @@ use crate::{
     merged_module::MergedEcmascriptModule,
     parse::generate_js_source_map,
     references::{
-        SideEffectsMode, analyze_ecmascript_module,
+        analyze_ecmascript_module,
         async_module::OptionAsyncModule,
         esm::{base::EsmAssetReferences, export},
     },
@@ -778,11 +778,7 @@ impl Module for EcmascriptModuleAsset {
         Ok(if *pkg_side_effect_free.await? {
             pkg_side_effect_free
         } else {
-            Vc::cell(matches!(
-                self.analyze().await?.side_effects,
-                SideEffectsMode::HasSideEffectFreeDirective
-                    | SideEffectsMode::LocallySideEffectFree
-            ))
+            Vc::cell(self.analyze().await?.side_effects == ModuleSideEffects::SideEffectFree)
         })
     }
 }

@@ -77,7 +77,7 @@ use turbopack_core::{
     environment::Rendering,
     error::PrettyPrintError,
     issue::{IssueExt, IssueSeverity, IssueSource, StyledString, analyze::AnalyzeIssue},
-    module::Module,
+    module::{Module, ModuleSideEffects},
     reference::{ModuleReference, ModuleReferences},
     reference_type::{CommonJsReferenceSubType, ReferenceType},
     resolve::{
@@ -161,20 +161,6 @@ use crate::{
     },
 };
 
-#[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Debug, NonLocalValue, TraceRawVcs)]
-pub enum SideEffectsMode {
-    /// Analysis determined that the module evaluation is side effect free
-    /// the module may still be side effectful based on its imports.
-    LocallySideEffectFree,
-    /// Has module level annotation
-    /// ```js
-    /// "use turbopack no side effects"
-    /// ```
-    HasSideEffectFreeDirective,
-    // Neither of the above, so we should assume it has side effects.
-    SideEffectful,
-}
-
 #[turbo_tasks::value(shared)]
 pub struct AnalyzeEcmascriptModuleResult {
     references: Vec<ResolvedVc<Box<dyn ModuleReference>>>,
@@ -186,7 +172,7 @@ pub struct AnalyzeEcmascriptModuleResult {
     pub code_generation: ResolvedVc<CodeGens>,
     pub exports: ResolvedVc<EcmascriptExports>,
     pub async_module: ResolvedVc<OptionAsyncModule>,
-    pub side_effects: SideEffectsMode,
+    pub side_effects: ModuleSideEffects,
     /// `true` when the analysis was successful.
     pub successful: bool,
     pub source_map: Option<ResolvedVc<Box<dyn GenerateSourceMap>>>,
@@ -247,7 +233,7 @@ struct AnalyzeEcmascriptModuleResultBuilder {
     async_module: ResolvedVc<OptionAsyncModule>,
     successful: bool,
     source_map: Option<ResolvedVc<Box<dyn GenerateSourceMap>>>,
-    side_effects: SideEffectsMode,
+    side_effects: ModuleSideEffects,
     #[cfg(debug_assertions)]
     ident: RcStr,
 }
@@ -267,7 +253,7 @@ impl AnalyzeEcmascriptModuleResultBuilder {
             async_module: ResolvedVc::cell(None),
             successful: false,
             source_map: None,
-            side_effects: SideEffectsMode::SideEffectful,
+            side_effects: ModuleSideEffects::SideEffectful,
             #[cfg(debug_assertions)]
             ident: Default::default(),
         }
@@ -345,7 +331,7 @@ impl AnalyzeEcmascriptModuleResultBuilder {
     }
 
     /// Set whether this module is side-effect free according to a user-provided directive.
-    pub fn set_side_effects_mode(&mut self, value: SideEffectsMode) {
+    pub fn set_side_effects_mode(&mut self, value: ModuleSideEffects) {
         self.side_effects = value;
     }
 
@@ -673,13 +659,12 @@ async fn analyze_ecmascript_module_internal(
         _ => false,
     });
     analysis.set_side_effects_mode(if has_side_effect_free_directive {
-        SideEffectsMode::HasSideEffectFreeDirective
-    } else if GLOBALS.set(globals, || {
-        side_effects::has_side_effects(program, comments, eval_context.unresolved_mark)
-    }) {
-        SideEffectsMode::SideEffectful
+        ModuleSideEffects::SideEffectFree
     } else {
-        SideEffectsMode::LocallySideEffectFree
+        // Otherwise analyze the AST
+        GLOBALS.set(globals, || {
+            side_effects::has_side_effects(program, comments, eval_context.unresolved_mark)
+        })
     });
 
     let is_esm = eval_context.is_esm(specified_type);

@@ -1,19 +1,21 @@
 //! Side effect analysis for JavaScript/TypeScript programs.
 //!
-//! This module provides functionality to determine if a program has side effects
-//! at the top level. This is useful for tree-shaking and dead code elimination.
+//! This module provides functionality to determine if a javascript script/module has side effects
+//! during module evaluation. This is useful for tree-shaking and dead code elimination.
 //!
 //! ## What are side effects?
 //!
 //! A side effect is any observable behavior that occurs when code is executed:
-//! - Function calls (unless marked with `/*#__PURE__*/` or known to be pure)
-//! - Constructor calls (unless marked with `/*#__PURE__*/`)
+//! - Function calls (unless marked with `/*#__PURE__*/` or otherwise known to be pure)
+//! - Constructor calls (unless marked with `/*#__PURE__*/`or otherwise known to be pure )
 //! - Assignments to variables or properties
+//!     - TODO: Unless the variable is defined in the same scope.
 //! - Property mutations
+//!     - TODO: Unless the object being mutated is defined in the same scope
 //! - Update expressions (`++`, `--`)
 //! - Delete expressions
-//! - I/O operations
-//! - Async operations (await, yield)
+//! - Async operations (await)
+//!    - These are debatable, but for now we assume it is tied to a side effectful operation.
 //!
 //! ## Features
 //!
@@ -61,7 +63,96 @@
 //!
 //! This analyzer is intentionally conservative. When in doubt, it assumes code
 //! has side effects. This is safe for tree-shaking purposes as it prevents
-//! incorrectly removing code that might be needed.
+//! incorrectly removing code that might be needed, and can simply be improved over time.
+//!
+//! ## Future Enhancement: Local Variable Mutation Tracking
+//!
+//! Currently, all assignments, updates, and property mutations are treated as side effects.
+//! However, mutations to locally-scoped variables that never escape the module could be
+//! considered side-effect free. This would handle common patterns like:
+//!
+//! ```javascript
+//! // Currently marked as having side effects, but could be pure:
+//! const config = {};
+//! config['a'] = 'a';
+//! config['b'] = 'b';
+//! export default config;
+//! ```
+//!
+//! ### Proposed Approach: Hybrid Conservative Local Variable Tracking
+//!
+//! **Goal**: Allow mutations to variables that are:
+//! 1. Declared in module scope with pure initializers
+//! 2. Never escape the module (not passed to unknown functions, not assigned external values)
+//!
+//! **Implementation Strategy**:
+//!
+//! Track local variables with a `FxHashMap<Id, LocalVarInfo>` where:
+//! - `Id` is from `Ident::to_id()` (combines symbol and scope context)
+//! - `LocalVarInfo` tracks: purity status, whether it has escaped
+//!
+//! **Phase 1: Identify Pure Local Variables**
+//!
+//! During `visit_var_declarator`, mark variables as "pure local" if initialized with:
+//! - Literals: `const x = 5;`
+//! - Object/array literals with pure contents: `const config = {};`, `const arr = [1, 2, 3];`
+//! - Known pure constructors: `const s = new Set();`
+//! - Pure built-in calls: `const keys = Object.keys(obj);`
+//!
+//! **Phase 2: Track Escaping**
+//!
+//! Mark a variable as "escaped" if:
+//! - Assigned a non-pure value: `config = globalThis.foo;` (variable becomes impure)
+//! - Assigned to global/external reference: `globalThis.config = config;`
+//! - Passed to unknown function: `someFunc(config);`
+//! - Exported by reference: `export { config };` (export default is OK if value is copied)
+//! - Returned from a called function expression
+//!
+//! **Phase 3: Allow Side-Effect-Free Mutations**
+//!
+//! In `visit_expr`, allow these without marking as side effects:
+//! - `Expr::Assign` where target is `obj.prop` or `obj[key]` and `obj` is a non-escaped pure local
+//! - `Expr::Update` where target is a non-escaped pure local
+//! - `Expr::Delete` where target is property of non-escaped pure local
+//!
+//! **Important Edge Cases**:
+//!
+//! 1. **Reassignment invalidates purity**: ```javascript const config = {};      // pure local
+//!    config.a = 1;           // OK, still pure config = external.obj;  // config is now impure
+//!    (tainted) config.b = 2;           // Side effect! config is tainted ```
+//!
+//! 2. **Property access doesn't track deeply**: ```javascript const obj = { nested: {} }; const ref
+//!    = obj.nested;  // ref escapes, obj.nested is now tainted ref.prop = 1;            // Side
+//!    effect! ref escaped ``` Initially, only track first-level escaping. Deep tracking is complex.
+//!
+//! 3. **Function boundaries**: ```javascript const config = {}; function setup() { config.x = 1; //
+//!    Still OK - function not called at module eval time } const arr = [config]; // config escapes
+//!    into array ```
+//!
+//! **Integration with Existing Analyzer**:
+//!
+//! This overlaps with the module graph analyzer (`analyzer/graph.rs` and `analyzer/mod.rs`)
+//! which performs more sophisticated data flow analysis. Consider:
+//! - Whether this should be a separate pass or integrated into graph analysis
+//! - How this interacts with import/export analysis
+//! - Whether escape analysis should be shared between analyzers
+//!
+//! **Testing Strategy**:
+//!
+//! Add tests covering:
+//! - Basic pattern: object literal with mutations
+//! - Reassignment tainting: `config = external;`
+//! - Escaping via function calls: `func(config)`
+//! - Escaping via assignment: `global.x = config`
+//! - Array elements: `const arr = []; arr[0] = 1;`
+//! - Nested scopes and shadowing
+//! - Interaction with exports
+//!
+//! **Performance Considerations**:
+//!
+//! - Use `FxHashMap` for O(1) lookups (already used elsewhere in analyzer)
+//! - Consider two-pass analysis if single-pass is too complex
+//! - Most modules have few top-level variables, so overhead should be minimal
 
 use once_cell::sync::Lazy;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -72,6 +163,7 @@ use swc_core::{
         visit::{Visit, VisitWith},
     },
 };
+use turbopack_core::module::ModuleSideEffects;
 
 use crate::utils::unparen;
 
@@ -170,7 +262,6 @@ static KNOWN_PURE_GLOBAL_FUNCTIONS: Lazy<FxHashSet<&'static str>> = Lazy::new(||
 ///
 /// These constructors create new objects without side effects (no global state modification).
 /// They are safe to eliminate if their result is unused.
-/// Structured as FxHashSet for O(1) lookup.
 static KNOWN_PURE_CONSTRUCTORS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
     FxHashSet::from_iter([
         // Built-in collections
@@ -217,6 +308,10 @@ static KNOWN_PURE_CONSTRUCTORS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
     ])
 });
 
+// For prototype methods we are not saying that these functions are always side effect free but
+// rather that we can safely reason about their side effects when called on literal expressions.
+// We do however assume that these functions are not monkey patched.
+
 /// Known pure prototype methods for string literals.
 ///
 /// These methods don't mutate the string (strings are immutable) and don't have side effects.
@@ -262,10 +357,6 @@ static KNOWN_PURE_STRING_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> = Lazy
 });
 
 /// Known pure prototype methods for array literals.
-///
-/// These methods don't mutate the array and don't have side effects.
-/// Note: Methods like map, filter, etc. can have side effects if the callback has side effects,
-/// but we check callback arguments separately.
 static KNOWN_PURE_ARRAY_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
     FxHashSet::from_iter([
         // Non-mutating iteration
@@ -290,7 +381,6 @@ static KNOWN_PURE_ARRAY_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> = Lazy:
         "lastIndexOf",
         "join",
         // Conversion
-        "toString",
         "toLocaleString",
         "toReversed",
         "toSorted",
@@ -299,24 +389,19 @@ static KNOWN_PURE_ARRAY_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> = Lazy:
     ])
 });
 
-static KNOWN_PURE_OBJECT_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> =
-    Lazy::new(|| FxHashSet::from_iter(["hasOwnProperty", "propertyIsEnumerable"]));
-
-/// Known pure prototype methods for number literals.
-static KNOWN_PURE_NUMBER_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
+static KNOWN_PURE_OBJECT_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
     FxHashSet::from_iter([
-        "toExponential",
-        "toFixed",
-        "toPrecision",
+        "hasOwnProperty",
+        "propertyIsEnumerable",
         "toString",
         "valueOf",
-        "toLocaleString",
     ])
 });
 
-/// Known pure prototype methods for boolean literals.
-static KNOWN_PURE_BOOLEAN_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> =
-    Lazy::new(|| FxHashSet::from_iter(["toString", "valueOf"]));
+/// Known pure prototype methods for number literals.
+static KNOWN_PURE_NUMBER_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> = Lazy::new(|| {
+    FxHashSet::from_iter(["toExponential", "toFixed", "toPrecision", "toLocaleString"])
+});
 
 /// Known pure prototype methods for RegExp literals.
 ///
@@ -328,7 +413,7 @@ static KNOWN_PURE_BOOLEAN_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> =
 ///
 /// However, to be conservative for tree-shaking, we exclude these methods.
 static KNOWN_PURE_REGEXP_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> =
-    Lazy::new(|| FxHashSet::from_iter(["toString", "test", "exec"]));
+    Lazy::new(|| FxHashSet::from_iter(["test", "exec"]));
 
 /// Analyzes a program to determine if it contains side effects at the top level.
 ///
@@ -375,10 +460,20 @@ static KNOWN_PURE_REGEXP_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> =
 /// - `x = 5;`
 /// - `foo();`
 /// - `new SideEffect();`
-pub fn has_side_effects(program: &Program, comments: &dyn Comments, unresolved_mark: Mark) -> bool {
+pub fn has_side_effects(
+    program: &Program,
+    comments: &dyn Comments,
+    unresolved_mark: Mark,
+) -> ModuleSideEffects {
     let mut visitor = SideEffectVisitor::new(comments, unresolved_mark);
     program.visit_with(&mut visitor);
-    visitor.has_side_effects
+    if visitor.has_side_effects {
+        ModuleSideEffects::SideEffectful
+    } else if visitor.has_imports {
+        ModuleSideEffects::ModuleEvaluationIsSideEffectFree
+    } else {
+        ModuleSideEffects::SideEffectFree
+    }
 }
 
 /// Visitor that traverses the AST to detect side effects.
@@ -386,6 +481,8 @@ struct SideEffectVisitor<'a> {
     comments: &'a dyn Comments,
     unresolved_mark: Mark,
     has_side_effects: bool,
+    will_invoke_fn_exprs: bool,
+    has_imports: bool,
 }
 
 impl<'a> SideEffectVisitor<'a> {
@@ -394,6 +491,8 @@ impl<'a> SideEffectVisitor<'a> {
             comments,
             unresolved_mark,
             has_side_effects: false,
+            will_invoke_fn_exprs: false,
+            has_imports: false,
         }
     }
 
@@ -465,8 +564,7 @@ impl<'a> SideEffectVisitor<'a> {
                                     || KNOWN_PURE_OBJECT_PROTOTYPE_METHODS.contains(method_name)
                             }
                             Lit::Bool(_) => {
-                                KNOWN_PURE_BOOLEAN_PROTOTYPE_METHODS.contains(method_name)
-                                    || KNOWN_PURE_OBJECT_PROTOTYPE_METHODS.contains(method_name)
+                                KNOWN_PURE_OBJECT_PROTOTYPE_METHODS.contains(method_name)
                             }
                             Lit::Regex(_) => {
                                 KNOWN_PURE_REGEXP_PROTOTYPE_METHODS.contains(method_name)
@@ -483,7 +581,7 @@ impl<'a> SideEffectVisitor<'a> {
                             || KNOWN_PURE_OBJECT_PROTOTYPE_METHODS.contains(method_name)
                     }
                     (Expr::Object(_), MemberProp::Ident(prop)) => {
-                        KNOWN_PURE_NUMBER_PROTOTYPE_METHODS.contains(prop.sym.as_ref())
+                        KNOWN_PURE_OBJECT_PROTOTYPE_METHODS.contains(prop.sym.as_ref())
                     }
                     _ => false,
                 }
@@ -570,7 +668,9 @@ impl<'a> Visit for SideEffectVisitor<'a> {
 
         match decl {
             // Import statements have no side effects (module loading is tracked separately)
-            ModuleDecl::Import(_) => {}
+            ModuleDecl::Import(_) => {
+                self.has_imports = true;
+            }
 
             // Export declarations need to check their contents
             ModuleDecl::ExportDecl(export_decl) => {
@@ -677,6 +777,12 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             }
             Expr::Arrow(_) | Expr::Fn(_) => {
                 // Function expressions are pure (don't execute until called)
+                if self.will_invoke_fn_exprs {
+                    // assume that any nested function expressions will not be invoked.
+                    self.will_invoke_fn_exprs = false;
+                    expr.visit_children_with(self);
+                    self.will_invoke_fn_exprs = true;
+                }
             }
             Expr::Array(arr) => {
                 // Arrays are pure if their elements are pure
@@ -693,6 +799,8 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             Expr::Unary(unary) => {
                 // Most unary operations are pure, but delete is not
                 if unary.op == UnaryOp::Delete {
+                    // TODO: allow deletes to module level variables or properties defined on module
+                    // level variables
                     self.mark_side_effect();
                 } else {
                     unary.arg.visit_with(self);
@@ -743,9 +851,13 @@ impl<'a> Visit for SideEffectVisitor<'a> {
                     call.callee.visit_with(self);
 
                     // Check all arguments
+                    // Assume that any function expressions in the arguments will be invoked.
+                    let old_will_invoke_fn_exprs = self.will_invoke_fn_exprs;
+                    self.will_invoke_fn_exprs = true;
                     for arg in &call.args {
                         arg.expr.visit_with(self);
                     }
+                    self.will_invoke_fn_exprs = old_will_invoke_fn_exprs;
                 } else {
                     // Unmarked calls are considered to have side effects
                     self.mark_side_effect();
@@ -767,20 +879,26 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             }
             Expr::Assign(_) => {
                 // Assignments have side effects
+                // TODO: allow assignments to module level variables
                 self.mark_side_effect();
             }
             Expr::Update(_) => {
                 // Updates (++, --) have side effects
+                // TODO: allow updates to module level variables
                 self.mark_side_effect();
             }
             Expr::Await(_) | Expr::Yield(_) => {
-                // Async operations have side effects
+                // Async operations have side effects, this could be less conservative
                 self.mark_side_effect();
             }
             Expr::TaggedTpl(tagged_tpl) => {
                 // Tagged template literals are function calls
                 // But some are known to be pure, like String.raw
-                if !self.is_known_pure_builtin_function(&tagged_tpl.tag) {
+                if self.is_known_pure_builtin_function(&tagged_tpl.tag) {
+                    for arg in &tagged_tpl.tpl.exprs {
+                        arg.visit_with(self);
+                    }
+                } else {
                     self.mark_side_effect();
                 }
             }
@@ -815,6 +933,8 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             }
             OptChainBase::Call(_opt_call) => {
                 // Optional calls are still calls, so impure
+                // We could maybe support some of these `(foo_enabled? undefined :
+                // [])?.map(...)` but this seems pretty theoretical
                 self.mark_side_effect();
             }
         }
@@ -889,7 +1009,7 @@ mod tests {
     use swc_core::{
         common::{FileName, GLOBALS, Mark, SourceMap, comments::SingleThreadedComments, sync::Lrc},
         ecma::{
-            ast::{EsVersion, Program},
+            ast::EsVersion,
             parser::{EsSyntax, Syntax, parse_file_as_program},
             transforms::base::resolver,
             visit::VisitMutWith,
@@ -899,65 +1019,72 @@ mod tests {
     use super::*;
 
     /// Helper function to parse JavaScript code from a string and run the resolver
-    /// NOTE: Must be called within a GLOBALS.set() closure
-    fn parse(code: &str) -> (Program, SingleThreadedComments, Mark) {
-        let cm = Lrc::new(SourceMap::default());
-        let fm = cm.new_source_file(Lrc::new(FileName::Anon), code.to_string());
+    fn parse_and_check_for_side_effects(code: &str, expected: ModuleSideEffects) {
+        GLOBALS.set(&Default::default(), || {
+            let cm = Lrc::new(SourceMap::default());
+            let fm = cm.new_source_file(Lrc::new(FileName::Anon), code.to_string());
 
-        let comments = SingleThreadedComments::default();
-        let mut errors = vec![];
+            let comments = SingleThreadedComments::default();
+            let mut errors = vec![];
 
-        let mut program = parse_file_as_program(
-            &fm,
-            Syntax::Es(EsSyntax {
-                jsx: true,
-                ..Default::default()
-            }),
-            EsVersion::latest(),
-            Some(&comments),
-            &mut errors,
-        )
-        .expect("Failed to parse");
+            let mut program = parse_file_as_program(
+                &fm,
+                Syntax::Es(EsSyntax {
+                    jsx: true,
+                    ..Default::default()
+                }),
+                EsVersion::latest(),
+                Some(&comments),
+                &mut errors,
+            )
+            .expect("Failed to parse");
 
-        // Run the resolver to mark unresolved identifiers
-        let unresolved_mark = Mark::new();
-        let top_level_mark = Mark::new();
-        program.visit_mut_with(&mut resolver(unresolved_mark, top_level_mark, false));
+            // Run the resolver to mark unresolved identifiers
+            let unresolved_mark = Mark::new();
+            let top_level_mark = Mark::new();
+            program.visit_mut_with(&mut resolver(unresolved_mark, top_level_mark, false));
 
-        (program, comments, unresolved_mark)
+            let actual = has_side_effects(&program, &comments, unresolved_mark);
+
+            let msg = match expected {
+                ModuleSideEffects::ModuleEvaluationIsSideEffectFree => {
+                    "Expected code to have no local side effects"
+                }
+                ModuleSideEffects::SideEffectFree => "Expected code to be side effect free",
+                ModuleSideEffects::SideEffectful => "Expected code to have side effects",
+            };
+            assert_eq!(actual, expected, "{}:\n{}", msg, code);
+        })
     }
 
-    /// Generate a test that asserts the given code HAS side effects
-    macro_rules! side_effects {
-        ($name:ident, $code:expr) => {
+    /// Generate a test that asserts the given code has the expected side effect status
+    macro_rules! assert_side_effects {
+        ($name:ident, $code:expr, $expected:expr) => {
             #[test]
             fn $name() {
-                GLOBALS.set(&Default::default(), || {
-                    let (program, comments, unresolved_mark) = parse($code);
-                    assert!(
-                        has_side_effects(&program, &comments, unresolved_mark),
-                        "Expected code to have side effects:\n{}",
-                        $code
-                    );
-                });
+                parse_and_check_for_side_effects($code, $expected);
             }
         };
     }
 
-    /// Generate a test that asserts the given code is side-effect FREE
+    macro_rules! side_effects {
+        ($name:ident, $code:expr) => {
+            assert_side_effects!($name, $code, ModuleSideEffects::SideEffectful);
+        };
+    }
+
     macro_rules! no_side_effects {
         ($name:ident, $code:expr) => {
-            #[test]
-            fn $name() {
-                GLOBALS.set(&Default::default(), || {
-                    let (program, comments, unresolved_mark) = parse($code);
-                    assert!(
-                        !has_side_effects(&program, &comments, unresolved_mark),
-                        "Expected code to be side-effect free:\n{}",
-                        $code
-                    );
-                });
-            }
+            assert_side_effects!($name, $code, ModuleSideEffects::SideEffectFree);
+        };
+    }
+    macro_rules! module_evaluation_is_side_effect_free {
+        ($name:ident, $code:expr) => {
+            assert_side_effects!(
+                $name,
+                $code,
+                ModuleSideEffects::ModuleEvaluationIsSideEffectFree
+            );
         };
     }
 
@@ -1014,7 +1141,7 @@ mod tests {
 
     // ==================== Phase 4: Import/Export ====================
 
-    no_side_effects!(test_import_statement, "import x from 'y';");
+    module_evaluation_is_side_effect_free!(test_import_statement, "import x from 'y';");
 
     no_side_effects!(test_export_statement, "export default 5;");
 
@@ -1526,40 +1653,9 @@ mod tests {
         test_array_literal_map,
         r#"const result = [1, 2, 3].map(x => x * 2);"#
     );
-
-    no_side_effects!(
-        test_array_literal_filter,
-        r#"const result = [1, 2, 3].filter(x => x > 1);"#
-    );
-
-    no_side_effects!(
-        test_array_literal_reduce,
-        r#"const result = [1, 2, 3].reduce((a, b) => a + b, 0);"#
-    );
-
-    no_side_effects!(
-        test_array_literal_slice,
-        r#"const result = [1, 2, 3, 4, 5].slice(1, 3);"#
-    );
-
-    no_side_effects!(
-        test_array_literal_concat,
-        r#"const result = [1, 2].concat([3, 4]);"#
-    );
-
-    no_side_effects!(
-        test_array_literal_includes,
-        r#"const result = [1, 2, 3].includes(2);"#
-    );
-
-    no_side_effects!(
-        test_array_literal_join,
-        r#"const result = [1, 2, 3].join(',');"#
-    );
-
-    no_side_effects!(
-        test_array_literal_find,
-        r#"const result = [1, 2, 3].find(x => x > 1);"#
+    side_effects!(
+        test_array_literal_map_with_effectful_callback,
+        r#"const result = [1, 2, 3].map(x => {globalThis.something.push(x)});"#
     );
 
     // Number literal methods - need parentheses for number literals
