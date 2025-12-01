@@ -1,9 +1,9 @@
 use anyhow::Result;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use turbo_tasks::{ResolvedVc, TryJoinIterExt, Vc};
 
 use crate::{
-    module::Module,
+    module::{Module, ModuleSideEffects},
     module_graph::{GraphTraversalAction, ModuleGraph, SingleModuleGraphWithBindingUsage},
 };
 
@@ -13,7 +13,7 @@ use crate::{
 #[turbo_tasks::value(transparent)]
 pub struct SideEffectFreeModules(FxHashSet<ResolvedVc<Box<dyn Module>>>);
 
-#[turbo_tasks::function(operation)]
+#[turbo_tasks::function]
 pub async fn compute_side_effect_free_module_info(
     graphs: ResolvedVc<ModuleGraph>,
 ) -> Result<Vc<SideEffectFreeModules>> {
@@ -32,56 +32,89 @@ async fn compute_side_effect_free_module_info_single(
     graph: SingleModuleGraphWithBindingUsage,
     parent_side_effect_free_modules: Vc<SideEffectFreeModules>,
 ) -> Result<Vc<SideEffectFreeModules>> {
-    let parent_async_modules = parent_side_effect_free_modules.await?;
+    let parent_side_effect_free_modules = parent_side_effect_free_modules.await?;
     let graph = graph.read().await?;
 
-    let self_async_modules = graph
-        .graphs
-        .first()
-        .unwrap()
-        .iter_nodes()
-        .map(async |node| Ok((node, *node.is_self_async().await?)))
+    let module_side_effects = graph
+        .enumerate_nodes()
+        .map(async |(_, node)| {
+            Ok(match node {
+                super::SingleModuleGraphNode::Module(module) => {
+                    // This turbo task always has a cache hit since it is called when building the
+                    // module graph. we could consider moving this information
+                    // into to the module graph, but then changes would invalidate the whole graph.
+                    (*module, *module.side_effects().await?)
+                }
+                super::SingleModuleGraphNode::VisitedModule { idx: _, module } => (
+                    *module,
+                    if parent_side_effect_free_modules.contains(module) {
+                        ModuleSideEffects::DeclaredSideEffectFree
+                    } else {
+                        ModuleSideEffects::SideEffectful
+                    },
+                ),
+            })
+        })
         .try_join()
         .await?
         .into_iter()
-        .flat_map(|(k, v)| v.then_some(k))
-        .chain(parent_async_modules.iter().copied())
+        .collect::<FxHashMap<_, _>>();
+
+    // Modules are categorized as side-effectful, locally side effect free and side effect free.
+    // So we are really just interested in determining what modules that are locally side effect
+    // free. logically we want to start at all such modules are determine if their transitive
+    // dependencies are side effect free.
+
+    let mut locally_side_effect_free_modules_that_have_side_effects = FxHashSet::default();
+    graph.traverse_edges_from_entries_dfs_reversed(
+        // Start from all the side effectful nodes
+        module_side_effects.iter().filter_map(|(m, e)| {
+            if *e == ModuleSideEffects::SideEffectful {
+                Some(*m)
+            } else {
+                None
+            }
+        }),
+        &mut (),
+        // child is a previously visited module that we know is side effectful
+        |child, _parent, _s| {
+            Ok(if let Some((child_module, _edge)) = child {
+                match module_side_effects.get(&child_module).unwrap() {
+                    ModuleSideEffects::SideEffectful
+                    | ModuleSideEffects::DeclaredSideEffectFree => {
+                        // We have either already seen this or don't want to follow it
+                        GraphTraversalAction::Exclude
+                    }
+                    ModuleSideEffects::ModuleEvaluationIsSideEffectFree => {
+                        // this module is side effect free locally but must depend on something
+                        // effectful so it to is effectful
+                        locally_side_effect_free_modules_that_have_side_effects
+                            .insert(child_module);
+                        GraphTraversalAction::Continue
+                    }
+                }
+            } else {
+                // entry point, keep going
+                GraphTraversalAction::Continue
+            })
+        },
+        |_, _, _| Ok(()),
+    )?;
+    let side_effect_free_modules = module_side_effects
+        .into_iter()
+        .filter_map(|(m, e)| match e {
+            ModuleSideEffects::SideEffectful => None,
+            ModuleSideEffects::DeclaredSideEffectFree => Some(m),
+            ModuleSideEffects::ModuleEvaluationIsSideEffectFree => {
+                if locally_side_effect_free_modules_that_have_side_effects.contains(&m) {
+                    None
+                } else {
+                    Some(m)
+                }
+            }
+        })
+        .chain(parent_side_effect_free_modules.iter().copied())
         .collect::<FxHashSet<_>>();
 
-    // To determine which modules are async, we need to propagate the self-async flag to all
-    // importers, which is done using a postorder traversal of the graph.
-    //
-    // This however doesn't cover cycles of async modules, which are handled by determining all
-    // strongly-connected components, and then marking all the whole SCC as async if one of the
-    // modules in the SCC is async.
-
-    let mut async_modules = self_async_modules;
-    graph.traverse_edges_from_entries_dfs(
-        graph.graphs.first().unwrap().entry_modules(),
-        &mut (),
-        |_, _, _| Ok(GraphTraversalAction::Continue),
-        |parent_info, module, _| {
-            let Some((parent_module, ref_data)) = parent_info else {
-                // An entry module
-                return Ok(());
-            };
-
-            if ref_data.chunking_type.is_inherit_async() && async_modules.contains(&module) {
-                async_modules.insert(parent_module);
-            }
-            Ok(())
-        },
-    )?;
-
-    graph.traverse_cycles(
-        |ref_data| ref_data.chunking_type.is_inherit_async(),
-        |cycle| {
-            if cycle.iter().any(|node| async_modules.contains(node)) {
-                async_modules.extend(cycle.iter().map(|n| **n));
-            }
-            Ok(())
-        },
-    )?;
-
-    Ok(Vc::cell(async_modules))
+    Ok(Vc::cell(side_effect_free_modules))
 }
