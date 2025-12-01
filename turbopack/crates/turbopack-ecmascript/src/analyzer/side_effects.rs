@@ -9,9 +9,7 @@
 //! - Function calls (unless marked with `/*#__PURE__*/` or otherwise known to be pure)
 //! - Constructor calls (unless marked with `/*#__PURE__*/`or otherwise known to be pure )
 //! - Assignments to variables or properties
-//!     - TODO: Unless the variable is defined in the same scope.
 //! - Property mutations
-//!     - TODO: Unless the object being mutated is defined in the same scope
 //! - Update expressions (`++`, `--`)
 //! - Delete expressions
 //! - Async operations (await)
@@ -117,17 +115,29 @@
 //!
 //! **Important Edge Cases**:
 //!
-//! 1. **Reassignment invalidates purity**: ```javascript const config = {};      // pure local
+//! 1. **Reassignment invalidates purity**:
+//! ```javascript
+//!    const config = {};      // pure local
 //!    config.a = 1;           // OK, still pure config = external.obj;  // config is now impure
-//!    (tainted) config.b = 2;           // Side effect! config is tainted ```
+//!    (tainted) config.b = 2; // Side effect! config is tainted
+//! ```
 //!
-//! 2. **Property access doesn't track deeply**: ```javascript const obj = { nested: {} }; const ref
-//!    = obj.nested;  // ref escapes, obj.nested is now tainted ref.prop = 1;            // Side
-//!    effect! ref escaped ``` Initially, only track first-level escaping. Deep tracking is complex.
+//! 2. **Property access doesn't track deeply**:
+//! ```javascript
+//!  const obj = { nested: {} };
+//!  const ref = obj.nested;  // ref escapes, obj.nested is now tainted
+//!  ref.prop = 1;            // Side effect! ref escaped
+//! ```
+//!  Initially, only track first-level escaping. Deep tracking is complex.
 //!
-//! 3. **Function boundaries**: ```javascript const config = {}; function setup() { config.x = 1; //
-//!    Still OK - function not called at module eval time } const arr = [config]; // config escapes
-//!    into array ```
+//! 3. **Function boundaries**:
+//!  ```javascript
+//!  const config = {};
+//!  function setup() {
+//!    config.x = 1; // Still OK - function not called at module eval time
+//!  }
+//!  const arr = [config]; // config escapes into array
+//!  ```
 //!
 //! **Integration with Existing Analyzer**:
 //!
