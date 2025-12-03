@@ -1049,6 +1049,11 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             return;
         }
 
+        // Check decorators - they execute at definition time
+        for decorator in &class.decorators {
+            decorator.visit_with(self);
+        }
+
         // Check the extends clause - this is evaluated at definition time
         if let Some(super_class) = &class.super_class {
             super_class.visit_with(self);
@@ -1073,6 +1078,10 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             }
             // Check static properties - they execute at definition time
             ClassMember::ClassProp(class_prop) if class_prop.is_static => {
+                // Check decorators - they execute at definition time
+                for decorator in &class_prop.decorators {
+                    decorator.visit_with(self);
+                }
                 // Check the property key (for computed properties)
                 class_prop.key.visit_with(self);
                 // Check the initializer - static property initializers execute at definition time
@@ -1082,6 +1091,10 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             }
             // Check computed property keys for all members
             ClassMember::Method(method) => {
+                // Check decorators - they execute at definition time
+                for decorator in &method.function.decorators {
+                    decorator.visit_with(self);
+                }
                 method.key.visit_with(self);
                 // Method bodies don't execute at definition time
             }
@@ -1090,19 +1103,35 @@ impl<'a> Visit for SideEffectVisitor<'a> {
                 // Constructor body doesn't execute at definition time
             }
             ClassMember::PrivateMethod(private_method) => {
+                // Check decorators - they execute at definition time
+                for decorator in &private_method.function.decorators {
+                    decorator.visit_with(self);
+                }
                 private_method.key.visit_with(self);
                 // Method bodies don't execute at definition time
             }
             ClassMember::ClassProp(class_prop) => {
+                // Check decorators - they execute at definition time
+                for decorator in &class_prop.decorators {
+                    decorator.visit_with(self);
+                }
                 // For non-static properties, only check the key
                 class_prop.key.visit_with(self);
                 // Instance property initializers don't execute at definition time
             }
             ClassMember::PrivateProp(private_prop) => {
+                // Check decorators - they execute at definition time
+                for decorator in &private_prop.decorators {
+                    decorator.visit_with(self);
+                }
                 private_prop.key.visit_with(self);
                 // Instance property initializers don't execute at definition time
             }
             ClassMember::AutoAccessor(auto_accessor) if auto_accessor.is_static => {
+                // Check decorators - they execute at definition time
+                for decorator in &auto_accessor.decorators {
+                    decorator.visit_with(self);
+                }
                 // Static auto accessors execute at definition time
                 auto_accessor.key.visit_with(self);
                 if let Some(value) = &auto_accessor.value {
@@ -1110,6 +1139,10 @@ impl<'a> Visit for SideEffectVisitor<'a> {
                 }
             }
             ClassMember::AutoAccessor(auto_accessor) => {
+                // Check decorators - they execute at definition time
+                for decorator in &auto_accessor.decorators {
+                    decorator.visit_with(self);
+                }
                 // Non-static auto accessors only check the key
                 auto_accessor.key.visit_with(self);
             }
@@ -1120,6 +1153,17 @@ impl<'a> Visit for SideEffectVisitor<'a> {
                 // TypeScript index signatures are pure
             }
         }
+    }
+
+    fn visit_decorator(&mut self, _decorator: &Decorator) {
+        if self.has_side_effects {
+            return;
+        }
+
+        // Decorators always have side effects because they are function calls
+        // that execute at class/member definition time, even if they're just
+        // identifier references (e.g., @decorator is equivalent to calling decorator())
+        self.mark_side_effect();
     }
 
     fn visit_pat(&mut self, pat: &Pat) {
@@ -1197,6 +1241,7 @@ mod tests {
                 &fm,
                 Syntax::Es(EsSyntax {
                     jsx: true,
+                    decorators: true,
                     ..Default::default()
                 }),
                 EsVersion::latest(),
@@ -2192,5 +2237,63 @@ mod tests {
     no_side_effects!(
         test_destructure_default_pure_annotation,
         "const { foo = /*#__PURE__*/ compute() } = obj;"
+    );
+
+    // ==================== Phase 14: Decorator Side Effects ====================
+
+    // Class decorator has side effects (executes at definition time)
+    side_effects!(
+        test_class_decorator,
+        r#"
+        @decorator
+        class Foo {}
+        "#
+    );
+
+    // Method decorator has side effects
+    side_effects!(
+        test_method_decorator,
+        r#"
+        class Foo {
+            @decorator
+            method() {}
+        }
+        "#
+    );
+
+    // Property decorator has side effects
+    side_effects!(
+        test_property_decorator,
+        r#"
+        class Foo {
+            @decorator
+            prop = 1;
+        }
+        "#
+    );
+
+    // Multiple decorators
+    side_effects!(
+        test_multiple_decorators,
+        r#"
+        @decorator1
+        @decorator2
+        class Foo {
+            @propDecorator
+            prop = 1;
+
+            @methodDecorator
+            method() {}
+        }
+        "#
+    );
+
+    // Decorator with arguments
+    side_effects!(
+        test_decorator_with_args,
+        r#"
+        @decorator(config())
+        class Foo {}
+        "#
     );
 }
