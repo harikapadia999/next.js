@@ -954,6 +954,26 @@ impl<'a> Visit for SideEffectVisitor<'a> {
                     expr.visit_with(self);
                 }
             }
+            Expr::SuperProp(super_prop) => {
+                // Super property access is pure (reading from parent class)
+                // Check if the property expression has side effects
+                super_prop.prop.visit_with(self);
+            }
+            Expr::MetaProp(_) => {
+                // Meta properties like import.meta and new.target are pure
+                // They just read metadata, don't cause side effects
+            }
+            Expr::JSXMember(_) | Expr::JSXNamespacedName(_) | Expr::JSXEmpty(_) => {
+                // JSX member expressions and names are pure (they're just identifiers)
+            }
+            Expr::JSXElement(_) | Expr::JSXFragment(_) => {
+                // JSX elements compile to function calls (React.createElement, etc.)
+                // These are side-effectful unless we know the JSX factory is pure
+                self.mark_side_effect();
+            }
+            Expr::PrivateName(_) => {
+                // Private names are pure (just identifiers)
+            }
 
             // Be conservative for other expression types
             // To support more
@@ -1074,7 +1094,10 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             // Static blocks execute at class definition time
             ClassMember::StaticBlock(block) => {
                 // Static blocks may have side effects because they execute immediately
-                block.visit_with(self);
+                // Check the statements in the block
+                for stmt in &block.body.stmts {
+                    stmt.visit_with(self);
+                }
             }
             // Check static properties - they execute at definition time
             ClassMember::ClassProp(class_prop) if class_prop.is_static => {
@@ -2295,5 +2318,200 @@ mod tests {
         @decorator(config())
         class Foo {}
         "#
+    );
+
+    // ==================== Phase 15: Additional Edge Cases ====================
+
+    // Super property access is pure
+    no_side_effects!(
+        test_super_property_pure,
+        r#"
+        class Foo extends Bar {
+            method() {
+                return super.parentMethod;
+            }
+        }
+        "#
+    );
+
+    // Super method call has side effects (but only when invoked, not at definition)
+    no_side_effects!(
+        test_super_call_in_method,
+        r#"
+        class Foo extends Bar {
+            method() {
+                return super.parentMethod();
+            }
+        }
+        "#
+    );
+
+    // import.meta is pure
+    no_side_effects!(test_import_meta, "const url = import.meta.url;");
+
+    // new.target is pure (only valid inside functions/constructors)
+    no_side_effects!(
+        test_new_target,
+        r#"
+        function Foo() {
+            console.log(new.target);
+        }
+        "#
+    );
+
+    // JSX element has side effects (compiles to function calls)
+    side_effects!(test_jsx_element, "const el = <div>Hello</div>;");
+
+    // JSX fragment has side effects
+    side_effects!(test_jsx_fragment, "const el = <>Hello</>;");
+
+    // Private field access is pure
+    no_side_effects!(
+        test_private_field_access,
+        r#"
+        class Foo {
+            #privateField = 42;
+            method() {
+                return this.#privateField;
+            }
+        }
+        "#
+    );
+
+    // Computed super property with side effect
+    no_side_effects!(
+        test_super_computed_property_pure,
+        r#"
+        class Foo extends Bar {
+            method() {
+                return super['prop'];
+            }
+        }
+        "#
+    );
+
+    // Static block with only pure statements is pure
+    no_side_effects!(
+        test_static_block_pure_content,
+        r#"
+        class Foo {
+            static {
+                const x = 1;
+                const y = 2;
+            }
+        }
+        "#
+    );
+
+    // Static block with side effect
+    side_effects!(
+        test_static_block_with_side_effect_inside,
+        r#"
+        class Foo {
+            static {
+                sideEffect();
+            }
+        }
+        "#
+    );
+
+    // This binding is pure
+    no_side_effects!(
+        test_this_expression,
+        r#"
+        class Foo {
+            method() {
+                return this;
+            }
+        }
+        "#
+    );
+
+    // Spread in call arguments (with pure expression)
+    no_side_effects!(
+        test_spread_pure_in_call,
+        "const result = Math.max(...[1, 2, 3]);"
+    );
+
+    // Spread in call arguments (with side effect)
+    side_effects!(
+        test_spread_with_side_effect,
+        "const result = Math.max(...getArray());"
+    );
+
+    // Complex super expression
+    no_side_effects!(
+        test_super_complex_access,
+        r#"
+        class Foo extends Bar {
+            static method() {
+                return super.parentMethod;
+            }
+        }
+        "#
+    );
+
+    // Getter/setter definitions are pure
+    no_side_effects!(
+        test_getter_definition,
+        r#"
+        const obj = {
+            get foo() {
+                return this._foo;
+            }
+        };
+        "#
+    );
+
+    // Async function declaration is pure
+    no_side_effects!(
+        test_async_function_declaration,
+        r#"
+        async function foo() {
+            return await something;
+        }
+        "#
+    );
+
+    // Generator function declaration is pure
+    no_side_effects!(
+        test_generator_declaration,
+        r#"
+        function* foo() {
+            yield 1;
+            yield 2;
+        }
+        "#
+    );
+
+    // Async generator is pure
+    no_side_effects!(
+        test_async_generator,
+        r#"
+        async function* foo() {
+            yield await something;
+        }
+        "#
+    );
+
+    // Using declaration (TC39 proposal) - if supported
+    // This would need to be handled if the parser supports it
+
+    // Nullish coalescing with side effects in right operand
+    side_effects!(
+        test_nullish_coalescing_with_side_effect,
+        "const x = a ?? sideEffect();"
+    );
+
+    // Logical OR with side effects
+    side_effects!(
+        test_logical_or_with_side_effect,
+        "const x = a || sideEffect();"
+    );
+
+    // Logical AND with side effects
+    side_effects!(
+        test_logical_and_with_side_effect,
+        "const x = a && sideEffect();"
     );
 }
