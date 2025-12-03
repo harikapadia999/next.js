@@ -100,8 +100,7 @@ impl Module for RawEcmascriptModule {
 
     #[turbo_tasks::function]
     fn side_effects(self: Vc<Self>) -> Vc<ModuleSideEffects> {
-        // Is this correct?
-        ModuleSideEffects::SideEffectFree.cell()
+        ModuleSideEffects::SideEffectful.cell()
     }
 }
 
