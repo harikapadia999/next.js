@@ -687,10 +687,14 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             // Export declarations need to check their contents
             ModuleDecl::ExportDecl(export_decl) => {
                 // Check the declaration being exported
-                // Note: Function and class declarations are pure
                 match &export_decl.decl {
-                    Decl::Fn(_) | Decl::Class(_) => {
-                        // Function and class declarations are pure
+                    Decl::Fn(_) => {
+                        // function declarations are pure
+                    }
+                    Decl::Class(class_decl) => {
+                        // Class declarations can have side effects in static blocks, extends or
+                        // static property initializers.
+                        class_decl.visit_with(self);
                     }
                     Decl::Var(var_decl) => {
                         // Variable declarations need their initializers checked
@@ -706,8 +710,13 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             ModuleDecl::ExportDefaultDecl(export_default_decl) => {
                 // Check the default export
                 match &export_default_decl.decl {
-                    DefaultDecl::Class(_) | DefaultDecl::Fn(_) => {
-                        // Class and function declarations are pure
+                    DefaultDecl::Class(cls) => {
+                        // Class expressions can have side effects in extends clause and static
+                        // members
+                        cls.visit_with(self);
+                    }
+                    DefaultDecl::Fn(_) => {
+                        // function declarations are pure
                     }
                     DefaultDecl::TsInterfaceDecl(_) => {
                         // TypeScript interface declarations are pure
@@ -721,7 +730,16 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             }
 
             // Re-exports have no side effects
-            ModuleDecl::ExportNamed(_) | ModuleDecl::ExportAll(_) => {}
+            ModuleDecl::ExportNamed(e) => {
+                if e.src.is_some() {
+                    // reexports are also imports
+                    self.has_imports = true;
+                }
+            }
+            ModuleDecl::ExportAll(_) => {
+                // reexports are also imports
+                self.has_imports = true;
+            }
 
             // TypeScript-specific exports
             ModuleDecl::TsImportEquals(_)
@@ -745,9 +763,13 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             Stmt::Decl(Decl::Var(var_decl)) => {
                 var_decl.visit_with(self);
             }
-            // Function and class declarations are side-effect free
-            Stmt::Decl(Decl::Fn(_)) | Stmt::Decl(Decl::Class(_)) => {
-                // Function and class declarations don't execute, so no side effects
+            // Function declarations are side-effect free
+            Stmt::Decl(Decl::Fn(_)) => {
+                // Function declarations don't execute, so no side effects
+            }
+            // Class declarations can have side effects in extends clause and static members
+            Stmt::Decl(Decl::Class(class_decl)) => {
+                class_decl.visit_with(self);
             }
             // Other declarations
             Stmt::Decl(decl) => {
@@ -766,6 +788,9 @@ impl<'a> Visit for SideEffectVisitor<'a> {
         if self.has_side_effects {
             return;
         }
+
+        // Check the pattern (for default values in destructuring)
+        var_decl.name.visit_with(self);
 
         // Check the initializer
         if let Some(init) = &var_decl.init {
@@ -795,6 +820,10 @@ impl<'a> Visit for SideEffectVisitor<'a> {
                     expr.visit_children_with(self);
                     self.will_invoke_fn_exprs = true;
                 }
+            }
+            Expr::Class(class_expr) => {
+                // Class expressions can have side effects in extends clause and static members
+                class_expr.class.visit_with(self);
             }
             Expr::Array(arr) => {
                 // Arrays are pure if their elements are pure
@@ -885,7 +914,7 @@ impl<'a> Visit for SideEffectVisitor<'a> {
                         }
                     }
                 } else {
-                    // Constructor calls are considered to have side effects
+                    // Unknown constructor calls are considered to have side effects
                     self.mark_side_effect();
                 }
             }
@@ -1012,6 +1041,131 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             _ => {
                 // Other property names are pure
             }
+        }
+    }
+
+    fn visit_class(&mut self, class: &Class) {
+        if self.has_side_effects {
+            return;
+        }
+
+        // Check the extends clause - this is evaluated at definition time
+        if let Some(super_class) = &class.super_class {
+            super_class.visit_with(self);
+        }
+
+        // Check class body for static members
+        for member in &class.body {
+            member.visit_with(self);
+        }
+    }
+
+    fn visit_class_member(&mut self, member: &ClassMember) {
+        if self.has_side_effects {
+            return;
+        }
+
+        match member {
+            // Static blocks execute at class definition time
+            ClassMember::StaticBlock(block) => {
+                // Static blocks may have side effects because they execute immediately
+                block.visit_with(self);
+            }
+            // Check static properties - they execute at definition time
+            ClassMember::ClassProp(class_prop) if class_prop.is_static => {
+                // Check the property key (for computed properties)
+                class_prop.key.visit_with(self);
+                // Check the initializer - static property initializers execute at definition time
+                if let Some(value) = &class_prop.value {
+                    value.visit_with(self);
+                }
+            }
+            // Check computed property keys for all members
+            ClassMember::Method(method) => {
+                method.key.visit_with(self);
+                // Method bodies don't execute at definition time
+            }
+            ClassMember::Constructor(constructor) => {
+                constructor.key.visit_with(self);
+                // Constructor body doesn't execute at definition time
+            }
+            ClassMember::PrivateMethod(private_method) => {
+                private_method.key.visit_with(self);
+                // Method bodies don't execute at definition time
+            }
+            ClassMember::ClassProp(class_prop) => {
+                // For non-static properties, only check the key
+                class_prop.key.visit_with(self);
+                // Instance property initializers don't execute at definition time
+            }
+            ClassMember::PrivateProp(private_prop) => {
+                private_prop.key.visit_with(self);
+                // Instance property initializers don't execute at definition time
+            }
+            ClassMember::AutoAccessor(auto_accessor) if auto_accessor.is_static => {
+                // Static auto accessors execute at definition time
+                auto_accessor.key.visit_with(self);
+                if let Some(value) = &auto_accessor.value {
+                    value.visit_with(self);
+                }
+            }
+            ClassMember::AutoAccessor(auto_accessor) => {
+                // Non-static auto accessors only check the key
+                auto_accessor.key.visit_with(self);
+            }
+            ClassMember::Empty(_) => {
+                // Empty members are pure
+            }
+            ClassMember::TsIndexSignature(_) => {
+                // TypeScript index signatures are pure
+            }
+        }
+    }
+
+    fn visit_pat(&mut self, pat: &Pat) {
+        if self.has_side_effects {
+            return;
+        }
+
+        match pat {
+            // Object patterns with default values need checking
+            Pat::Object(object_pat) => {
+                for prop in &object_pat.props {
+                    match prop {
+                        ObjectPatProp::KeyValue(kv) => {
+                            // Check the key (for computed properties)
+                            kv.key.visit_with(self);
+                            // Recursively check the value pattern
+                            kv.value.visit_with(self);
+                        }
+                        ObjectPatProp::Assign(assign) => {
+                            // Check the default value if present
+                            if let Some(value) = &assign.value {
+                                value.visit_with(self);
+                            }
+                        }
+                        ObjectPatProp::Rest(rest) => {
+                            // Rest patterns are pure, but check the nested pattern
+                            rest.arg.visit_with(self);
+                        }
+                    }
+                }
+            }
+            // Array patterns with default values need checking
+            Pat::Array(array_pat) => {
+                for elem in array_pat.elems.iter().flatten() {
+                    elem.visit_with(self);
+                }
+            }
+            // Assignment patterns (destructuring with defaults) need checking
+            Pat::Assign(assign_pat) => {
+                // Check the default value - this is evaluated if the value is undefined
+                assign_pat.right.visit_with(self);
+                // Also check the left side pattern
+                assign_pat.left.visit_with(self);
+            }
+            // Other patterns are pure
+            _ => {}
         }
     }
 }
@@ -1418,7 +1572,7 @@ mod tests {
 
     no_side_effects!(test_export_class, "export class Foo {}");
 
-    no_side_effects!(test_reexport, "export { foo } from 'bar';");
+    module_evaluation_is_side_effect_free!(test_reexport, "export { foo } from 'bar';");
 
     // import() is a function-like expression
     side_effects!(test_dynamic_import, "const mod = import('./module');");
@@ -1728,5 +1882,315 @@ mod tests {
     no_side_effects!(
         test_array_literal_map_with_callback,
         r#"const result = [1, 2, 3].map(x => x * 2);"#
+    );
+
+    // ==================== Phase 12: Class Expression Side Effects ====================
+
+    // Class with no extends and no static members is pure
+    no_side_effects!(test_class_no_extends_no_static, "class Foo {}");
+
+    // Class with pure extends is pure
+    no_side_effects!(test_class_pure_extends, "class Foo extends Bar {}");
+
+    // Class with function call in extends clause has side effects
+    side_effects!(
+        test_class_extends_with_call,
+        "class Foo extends someMixinFunction() {}"
+    );
+
+    // Class with complex expression in extends clause has side effects
+    side_effects!(
+        test_class_extends_with_complex_expr,
+        "class Foo extends (Bar || Baz()) {}"
+    );
+
+    // Class with static property initializer that calls function has side effects
+    side_effects!(
+        test_class_static_property_with_call,
+        r#"
+        class Foo {
+            static foo = someFunction();
+        }
+        "#
+    );
+
+    // Class with static property with pure initializer is pure
+    no_side_effects!(
+        test_class_static_property_pure,
+        r#"
+        class Foo {
+            static foo = 42;
+        }
+        "#
+    );
+
+    // Class with static property with array literal is pure
+    no_side_effects!(
+        test_class_static_property_array_literal,
+        r#"
+        class Foo {
+            static foo = [1, 2, 3];
+        }
+        "#
+    );
+
+    // Class with static block has side effects
+    side_effects!(
+        test_class_static_block,
+        r#"
+        class Foo {
+            static {
+                console.log("hello");
+            }
+        }
+        "#
+    );
+
+    no_side_effects!(
+        test_class_static_block_empty,
+        r#"
+        class Foo {
+            static {}
+        }
+        "#
+    );
+
+    // Class with instance property is pure (doesn't execute at definition time)
+    no_side_effects!(
+        test_class_instance_property_with_call,
+        r#"
+        class Foo {
+            foo = someFunction();
+        }
+        "#
+    );
+
+    // Class with constructor is pure (doesn't execute at definition time)
+    no_side_effects!(
+        test_class_constructor_with_side_effects,
+        r#"
+        class Foo {
+            constructor() {
+                console.log("constructor");
+            }
+        }
+        "#
+    );
+
+    // Class with method is pure (doesn't execute at definition time)
+    no_side_effects!(
+        test_class_method,
+        r#"
+        class Foo {
+            method() {
+                console.log("method");
+            }
+        }
+        "#
+    );
+
+    // Class expression with side effects in extends
+    side_effects!(
+        test_class_expr_extends_with_call,
+        "const Foo = class extends getMixin() {};"
+    );
+
+    // Class expression with static property calling function
+    side_effects!(
+        test_class_expr_static_with_call,
+        r#"
+        const Foo = class {
+            static prop = initValue();
+        };
+        "#
+    );
+
+    // Class expression with pure static property
+    no_side_effects!(
+        test_class_expr_static_pure,
+        r#"
+        const Foo = class {
+            static prop = "hello";
+        };
+        "#
+    );
+
+    // Export class with side effects
+    side_effects!(
+        test_export_class_with_side_effects,
+        r#"
+        export class Foo extends getMixin() {
+            static prop = init();
+        }
+        "#
+    );
+
+    // Export default class with side effects
+    side_effects!(
+        test_export_default_class_with_side_effects,
+        r#"
+        export default class Foo {
+            static { console.log("init"); }
+        }
+        "#
+    );
+
+    // Export class without side effects
+    no_side_effects!(
+        test_export_class_no_side_effects,
+        r#"
+        export class Foo {
+            method() {
+                console.log("method");
+            }
+        }
+        "#
+    );
+
+    // Multiple static properties, some pure, some not
+    side_effects!(
+        test_class_mixed_static_properties,
+        r#"
+        class Foo {
+            static a = 1;
+            static b = impureCall();
+            static c = 3;
+        }
+        "#
+    );
+
+    // Class with pure static property using known pure built-in
+    no_side_effects!(
+        test_class_static_property_pure_builtin,
+        r#"
+        class Foo {
+            static value = Math.abs(-5);
+        }
+        "#
+    );
+
+    // Class with computed property name that has side effects
+    side_effects!(
+        test_class_computed_property_with_call,
+        r#"
+        class Foo {
+            [computeName()]() {
+                return 42;
+            }
+        }
+        "#
+    );
+
+    // Class with pure computed property name
+    no_side_effects!(
+        test_class_computed_property_pure,
+        r#"
+        class Foo {
+            ['method']() {
+                return 42;
+            }
+        }
+        "#
+    );
+
+    // ==================== Phase 13: Complex Variable Declarations ====================
+
+    // Simple destructuring without defaults is pure
+    no_side_effects!(test_destructure_simple, "const { foo } = obj;");
+
+    // Destructuring with function call in default value has side effects
+    side_effects!(
+        test_destructure_default_with_call,
+        "const { foo = someFunction() } = obj;"
+    );
+
+    // Destructuring with pure default value is pure
+    no_side_effects!(test_destructure_default_pure, "const { foo = 42 } = obj;");
+
+    // Destructuring with array literal default is pure
+    no_side_effects!(
+        test_destructure_default_array_literal,
+        "const { foo = ['hello'] } = obj;"
+    );
+
+    // Destructuring with object literal default is pure
+    no_side_effects!(
+        test_destructure_default_object_literal,
+        "const { foo = { bar: 'baz' } } = obj;"
+    );
+
+    // Nested destructuring with default that has side effect
+    side_effects!(
+        test_destructure_nested_with_call,
+        "const { a: { b = sideEffect() } } = obj;"
+    );
+
+    // Array destructuring with default that has side effect
+    side_effects!(
+        test_array_destructure_default_with_call,
+        "const [a, b = getDefault()] = arr;"
+    );
+
+    // Array destructuring with pure default
+    no_side_effects!(
+        test_array_destructure_default_pure,
+        "const [a, b = 10] = arr;"
+    );
+
+    // Multiple variables, one with side effect in default
+    side_effects!(
+        test_multiple_destructure_mixed,
+        "const { foo = 1, bar = compute() } = obj;"
+    );
+
+    // Rest pattern is pure
+    no_side_effects!(test_destructure_rest_pure, "const { foo, ...rest } = obj;");
+
+    // Complex destructuring with multiple levels
+    side_effects!(
+        test_destructure_complex_with_side_effect,
+        r#"
+        const {
+            a,
+            b: { c = sideEffect() },
+            d = [1, 2, 3]
+        } = obj;
+        "#
+    );
+
+    // Complex destructuring all pure
+    no_side_effects!(
+        test_destructure_complex_pure,
+        r#"
+        const {
+            a,
+            b: { c = 5 },
+            d = [1, 2, 3]
+        } = obj;
+        "#
+    );
+
+    // Destructuring in export with side effect
+    side_effects!(
+        test_export_destructure_with_side_effect,
+        "export const { foo = init() } = obj;"
+    );
+
+    // Destructuring in export without side effect
+    no_side_effects!(
+        test_export_destructure_pure,
+        "export const { foo = 42 } = obj;"
+    );
+
+    // Default value with known pure built-in
+    no_side_effects!(
+        test_destructure_default_pure_builtin,
+        "const { foo = Math.abs(-5) } = obj;"
+    );
+
+    // Default value with pure annotation
+    no_side_effects!(
+        test_destructure_default_pure_annotation,
+        "const { foo = /*#__PURE__*/ compute() } = obj;"
     );
 }
