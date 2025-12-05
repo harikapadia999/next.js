@@ -5225,17 +5225,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pot"
-version = "3.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf741fa415952eb20f27fbc210dc85f31cc7cdc80aa3ce81d5e27d28a6f45dc2"
-dependencies = [
- "byteorder",
- "half",
- "serde",
-]
-
-[[package]]
 name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9102,7 +9091,6 @@ dependencies = [
  "mime",
  "ringmap",
  "serde",
- "serde_json",
  "smallvec",
  "unty",
 ]
@@ -9129,13 +9117,13 @@ name = "turbo-persistence"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode 2.0.1",
  "byteorder",
  "either",
  "jiff",
  "lzzzz",
  "memmap2 0.9.5",
  "parking_lot",
- "pot",
  "qfilter",
  "quick_cache",
  "rand 0.9.0",
@@ -9145,6 +9133,7 @@ dependencies = [
  "tempfile",
  "thread_local",
  "tracing",
+ "turbo-bincode",
  "twox-hash 2.1.0",
  "zstd",
 ]
@@ -9218,7 +9207,6 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "pin-project-lite",
- "pot",
  "rayon",
  "regex",
  "rustc-hash 2.1.1",
