@@ -12,7 +12,18 @@ pub enum StyleType {
     GlobalStyle,
 }
 
-#[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Debug, NonLocalValue, TraceRawVcs)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Hash,
+    Eq,
+    PartialEq,
+    Debug,
+    NonLocalValue,
+    TraceRawVcs,
+    bincode::Encode,
+    bincode::Decode,
+)]
 pub enum ModuleSideEffects {
     /// Analysis determined that the module evaluation is side effect free
     /// the module may still be side effectful based on its imports.

@@ -15,48 +15,6 @@
 //! - Async operations (await)
 //!    - These are debatable, but for now we assume it is tied to a side effectful operation.
 //!
-//! ## Features
-//!
-//! ### 1. Pure Annotations
-//!
-//! The analyzer respects `/*#__PURE__*/` and `/*@__PURE__*/` annotations:
-//!
-//! ```javascript
-//! // Has side effects
-//! const x = foo();
-//!
-//! // No side effects (marked pure)
-//! const y = /*#__PURE__*/ foo();
-//! ```
-//!
-//! ### 2. Known Pure Built-ins
-//!
-//! The analyzer recognizes common pure JavaScript built-ins:
-//!
-//! ```javascript
-//! // No side effects - known pure functions
-//! const abs = Math.abs(-5);
-//! const keys = Object.keys(obj);
-//! const isArray = Array.isArray(x);
-//!
-//! // No side effects - known pure constructors
-//! const s = new Set();
-//! const m = new Map();
-//! const re = new RegExp('pattern');
-//! ```
-//!
-//! ### 3. Expression-Level Analysis
-//!
-//! The analyzer recursively checks expressions:
-//!
-//! ```javascript
-//! // No side effects - pure operations
-//! const result = Math.abs(-5) + Math.floor(3.14);
-//!
-//! // Has side effects - impure argument
-//! const value = Math.abs(sideEffect());
-//! ```
-//!
 //! ## Conservative Analysis
 //!
 //! This analyzer is intentionally conservative. When in doubt, it assumes code
@@ -76,93 +34,6 @@
 //! config['b'] = 'b';
 //! export default config;
 //! ```
-//!
-//! ### Proposed Approach: Hybrid Conservative Local Variable Tracking
-//!
-//! **Goal**: Allow mutations to variables that are:
-//! 1. Declared in module scope with pure initializers
-//! 2. Never escape the module (not passed to unknown functions, not assigned external values)
-//!
-//! **Implementation Strategy**:
-//!
-//! Track local variables with a `FxHashMap<Id, LocalVarInfo>` where:
-//! - `Id` is from `Ident::to_id()` (combines symbol and scope context)
-//! - `LocalVarInfo` tracks: purity status, whether it has escaped
-//!
-//! **Phase 1: Identify Pure Local Variables**
-//!
-//! During `visit_var_declarator`, mark variables as "pure local" if initialized with:
-//! - Literals: `const x = 5;`
-//! - Object/array literals with pure contents: `const config = {};`, `const arr = [1, 2, 3];`
-//! - Known pure constructors: `const s = new Set();`
-//! - Pure built-in calls: `const keys = Object.keys(obj);`
-//!
-//! **Phase 2: Track Escaping**
-//!
-//! Mark a variable as "escaped" if:
-//! - Assigned a non-pure value: `config = globalThis.foo;` (variable becomes impure)
-//! - Assigned to global/external reference: `globalThis.config = config;`
-//! - Passed to unknown function: `someFunc(config);`
-//! - Exported by reference: `export { config };` (export default is OK if value is copied)
-//! - Returned from a called function expression
-//!
-//! **Phase 3: Allow Side-Effect-Free Mutations**
-//!
-//! In `visit_expr`, allow these without marking as side effects:
-//! - `Expr::Assign` where target is `obj.prop` or `obj[key]` and `obj` is a non-escaped pure local
-//! - `Expr::Update` where target is a non-escaped pure local
-//! - `Expr::Delete` where target is property of non-escaped pure local
-//!
-//! **Important Edge Cases**:
-//!
-//! 1. **Reassignment invalidates purity**:
-//! ```javascript
-//!    const config = {};      // pure local
-//!    config.a = 1;           // OK, still pure config = external.obj;  // config is now impure
-//!    (tainted) config.b = 2; // Side effect! config is tainted
-//! ```
-//!
-//! 2. **Property access doesn't track deeply**:
-//! ```javascript
-//!  const obj = { nested: {} };
-//!  const ref = obj.nested;  // ref escapes, obj.nested is now tainted
-//!  ref.prop = 1;            // Side effect! ref escaped
-//! ```
-//!  Initially, only track first-level escaping. Deep tracking is complex.
-//!
-//! 3. **Function boundaries**:
-//!  ```javascript
-//!  const config = {};
-//!  function setup() {
-//!    config.x = 1; // Still OK - function not called at module eval time
-//!  }
-//!  const arr = [config]; // config escapes into array
-//!  ```
-//!
-//! **Integration with Existing Analyzer**:
-//!
-//! This overlaps with the module graph analyzer (`analyzer/graph.rs` and `analyzer/mod.rs`)
-//! which performs more sophisticated data flow analysis. Consider:
-//! - Whether this should be a separate pass or integrated into graph analysis
-//! - How this interacts with import/export analysis
-//! - Whether escape analysis should be shared between analyzers
-//!
-//! **Testing Strategy**:
-//!
-//! Add tests covering:
-//! - Basic pattern: object literal with mutations
-//! - Reassignment tainting: `config = external;`
-//! - Escaping via function calls: `func(config)`
-//! - Escaping via assignment: `global.x = config`
-//! - Array elements: `const arr = []; arr[0] = 1;`
-//! - Nested scopes and shadowing
-//! - Interaction with exports
-//!
-//! **Performance Considerations**:
-//!
-//! - Use `FxHashMap` for O(1) lookups (already used elsewhere in analyzer)
-//! - Consider two-pass analysis if single-pass is too complex
-//! - Most modules have few top-level variables, so overhead should be minimal
 
 use once_cell::sync::Lazy;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -187,8 +58,6 @@ use crate::utils::unparen;
 ///
 /// Note: Some of these can throw exceptions, but for tree-shaking purposes,
 /// we consider them pure as they don't have observable side effects beyond exceptions.
-///
-/// Structured as FxHashMap<base_object, FxHashSet<method_name>> for O(1) lookup.
 static KNOWN_PURE_FUNCTIONS: Lazy<FxHashMap<&'static str, FxHashSet<&'static str>>> =
     Lazy::new(|| {
         let mut map = FxHashMap::default();
@@ -426,51 +295,7 @@ static KNOWN_PURE_REGEXP_PROTOTYPE_METHODS: Lazy<FxHashSet<&'static str>> =
     Lazy::new(|| FxHashSet::from_iter(["test", "exec"]));
 
 /// Analyzes a program to determine if it contains side effects at the top level.
-///
-/// Returns `true` if the program has side effects, `false` if it's side-effect free.
-///
-/// # Arguments
-///
-/// * `program` - The parsed JavaScript/TypeScript program to analyze
-/// * `comments` - Comments associated with the program (used for `/*#__PURE__*/` detection)
-/// * `unresolved_mark` - Mark identifying unresolved/global identifiers. The program should have
-///   been processed with the SWC resolver transform using this mark before calling this function.
-///   This is used to detect if built-in names like `Math`, `Array`, etc. are shadowed by local
-///   variables.
-///
-/// # Examples
-///
-/// ```ignore
-/// use swc_core::common::comments::SingleThreadedComments;
-/// use swc_core::ecma::parser::parse_file_as_program;
-/// use turbopack_ecmascript::analyzer::side_effects::has_side_effects;
-///
-/// let comments = SingleThreadedComments::default();
-/// let program = parse_file_as_program(/* ... */);
-///
-/// // Side-effect free code
-/// if !has_side_effects(&program, &comments) {
-///     // Safe to tree-shake
-/// }
-/// ```
-///
-/// # Pure Examples
-///
-/// The following code is considered side-effect free:
-/// - `const x = 5;`
-/// - `const arr = [1, 2, 3];`
-/// - `function foo() { return 1; }`
-/// - `const result = Math.abs(-5);`
-/// - `const x = /*#__PURE__*/ foo();`
-///
-/// # Impure Examples
-///
-/// The following code has side effects:
-/// - `console.log('hi');`
-/// - `x = 5;`
-/// - `foo();`
-/// - `new SideEffect();`
-pub fn has_side_effects(
+pub fn compute_module_evaluation_side_effects(
     program: &Program,
     comments: &dyn Comments,
     unresolved_mark: Mark,
@@ -486,7 +311,6 @@ pub fn has_side_effects(
     }
 }
 
-/// Visitor that traverses the AST to detect side effects.
 struct SideEffectVisitor<'a> {
     comments: &'a dyn Comments,
     unresolved_mark: Mark,
@@ -512,9 +336,7 @@ impl<'a> SideEffectVisitor<'a> {
     }
 
     /// Check if a span has a `/*#__PURE__*/` or `/*@__PURE__*/` annotation.
-    ///
-    /// These annotations are used by bundlers to mark function calls as side-effect free.
-    /// Uses SWC's built-in `has_flag` method which properly handles the annotation format.
+
     fn is_pure_annotated(&self, span: swc_core::common::Span) -> bool {
         self.comments.has_flag(span.lo, "PURE")
     }
@@ -621,7 +443,6 @@ impl<'a> SideEffectVisitor<'a> {
                 // Only consider it pure if the identifier is unresolved (global scope).
                 // Check if the identifier's context matches the unresolved mark.
                 if ident.ctxt.outer() != self.unresolved_mark {
-                    // The identifier is in a local scope, might be shadowed
                     return false;
                 }
 
@@ -968,17 +789,16 @@ impl<'a> Visit for SideEffectVisitor<'a> {
             }
             Expr::JSXElement(_) | Expr::JSXFragment(_) => {
                 // JSX elements compile to function calls (React.createElement, etc.)
-                // These are side-effectful unless we know the JSX factory is pure
+                // Assume there are side-effects
                 self.mark_side_effect();
             }
             Expr::PrivateName(_) => {
                 // Private names are pure (just identifiers)
             }
 
-            // Be conservative for other expression types
-            // To support more
+            // Be conservative for other expression types and just assume they are effectful
             _ => {
-                expr.visit_children_with(self);
+                self.mark_side_effect();
             }
         }
     }
@@ -1278,7 +1098,8 @@ mod tests {
             let top_level_mark = Mark::new();
             program.visit_mut_with(&mut resolver(unresolved_mark, top_level_mark, false));
 
-            let actual = has_side_effects(&program, &comments, unresolved_mark);
+            let actual =
+                compute_module_evaluation_side_effects(&program, &comments, unresolved_mark);
 
             let msg = match expected {
                 ModuleSideEffects::ModuleEvaluationIsSideEffectFree => {

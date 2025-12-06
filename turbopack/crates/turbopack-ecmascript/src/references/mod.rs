@@ -663,7 +663,11 @@ async fn analyze_ecmascript_module_internal(
     } else {
         // Otherwise analyze the AST
         GLOBALS.set(globals, || {
-            side_effects::has_side_effects(program, comments, eval_context.unresolved_mark)
+            side_effects::compute_module_evaluation_side_effects(
+                program,
+                comments,
+                eval_context.unresolved_mark,
+            )
         })
     });
 
