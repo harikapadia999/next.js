@@ -69,7 +69,7 @@ struct BytesBase64 {
     binary: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[turbo_tasks::value]
 #[serde(rename_all = "camelCase")]
 struct WebpackLoadersProcessingResult {

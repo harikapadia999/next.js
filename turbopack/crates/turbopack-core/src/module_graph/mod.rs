@@ -95,8 +95,6 @@ unsafe impl NonLocalValue for GraphNodeIndex {}
     Ord,
     Hash,
     PartialEq,
-    Serialize,
-    Deserialize,
     TraceRawVcs,
     NonLocalValue,
     Encode,
@@ -952,18 +950,7 @@ impl ModuleGraph {
 }
 
 #[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    TaskInput,
-    TraceRawVcs,
-    NonLocalValue,
-    Encode,
-    Decode,
+    Clone, Debug, PartialEq, Eq, Hash, TaskInput, TraceRawVcs, NonLocalValue, Encode, Decode,
 )]
 pub struct SingleModuleGraphWithBindingUsage {
     pub graph: ResolvedVc<SingleModuleGraph>,
